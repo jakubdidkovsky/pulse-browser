@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src * data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src 'self'">
+  <title>Pulse</title>
+  <link rel="stylesheet" href="vendor/inter/index.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div id="sb-header" class="drag"></div>
+      <div class="sb-scroll">
+        <div id="pinned" class="pinned"></div>
+        <div id="groups"></div>
+        <div id="tabs-section">
+          <div class="section-label"><span>Tabs</span></div>
+          <div id="tabs"></div>
+          <button id="new-tab-row" class="new-tab-row"></button>
+        </div>
+      </div>
+      <div id="sb-footer"></div>
+    </aside>
+    <div id="sidebar-resizer" class="resizer"></div>
+
+    <main id="main">
+      <header id="toolbar" class="drag"></header>
+      <nav id="favbar"></nav>
+      <div id="content-row">
+        <section id="content" class="card">
+          <div id="progress"></div>
+          <div id="views"></div>
+          <div id="start-page"></div>
+          <div id="error-page"></div>
+          <div id="find-bar"></div>
+          <div id="status-bubble"></div>
+        </section>
+        <div id="ai-resizer" class="resizer"></div>
+        <aside id="ai-panel" class="card"></aside>
+      </div>
+    </main>
+  </div>
+  <div id="peek-zone"></div>
+  <div id="overlay-root"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
