@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs (or updates) Pulse on Linux — picks the right package for the distro and processor:
+# Installs (or updates) Pulse on Linux, picking the right package for the distro and processor:
 #   Debian, Ubuntu, Mint, Pop!_OS…  → .deb via apt
 #   Fedora, RHEL, openSUSE…         → .rpm via dnf / zypper
 #   anything else, or no sudo       → AppImage unpacked into ~/.local (no root needed)
@@ -31,7 +31,7 @@ download() { # url file
   fi
 }
 
-fetch() { # url file — with a progress bar; stops the install on failure
+fetch() { # url file: with a progress bar; stops the install on failure
   if has curl; then curl -fL --progress-bar "$1" -o "$2"
   elif has wget; then wget -q --show-progress -O "$2" "$1"
   else die "Install curl or wget first."
@@ -39,7 +39,7 @@ fetch() { # url file — with a progress bar; stops the install on failure
   Is there a published release at https://github.com/$REPO/releases ?"
 }
 
-verify() { # file — checks it against the release's SHA256SUMS.txt
+verify() { # file: checks it against the release's SHA256SUMS.txt
   local sums="$TMP/SHA256SUMS.txt" name expected="" hash file
   has sha256sum || return 0
   if ! download "$BASE/SHA256SUMS.txt" "$sums"; then
@@ -54,7 +54,7 @@ verify() { # file — checks it against the release's SHA256SUMS.txt
   echo "$expected  $1" | sha256sum -c --status - || die "The download of $name is damaged (checksum mismatch). Please try again."
 }
 
-as_root() { # command… — runs it with sudo when needed
+as_root() { # command…: runs it with sudo when needed
   [ "$SUDO" != "none" ] || die "This needs administrator rights (sudo). To install just for yourself instead, run:
   $ONE_LINER --appimage"
   $SUDO "$@"

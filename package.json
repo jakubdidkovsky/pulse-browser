@@ -85,7 +85,7 @@
       ],
       "executableName": "pulse-browser",
       "category": "Network",
-      "maintainer": "Jakub Didkovsky <jakub@didkovsky.cz>",
+      "maintainer": "Jakub Didkovsky <135758282+jakubdidkovsky@users.noreply.github.com>",
       "synopsis": "Browser with a built-in AI agent",
       "mimeTypes": [
         "x-scheme-handler/http",

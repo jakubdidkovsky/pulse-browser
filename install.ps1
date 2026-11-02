@@ -1,4 +1,4 @@
-# Installs (or updates) Pulse on Windows 10/11 — no admin rights needed.
+# Installs (or updates) Pulse on Windows 10/11. No admin rights needed.
 #   irm https://raw.githubusercontent.com/jakubdidkovsky/pulse-browser/main/install.ps1 | iex
 # Uninstall: Settings → Apps → Installed apps → Pulse → Uninstall.
 
