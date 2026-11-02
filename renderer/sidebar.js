@@ -62,7 +62,7 @@ function renderFavbar() {
     strip.append(chip);
   }
   if (!pinned.length) {
-    strip.append(h('span', { class: 'fav-hint' }, h('span', { html: icon('pin', 12) }), 'Pin pages here for one-click access — drag a tab here or press ', h('kbd', {}, modKey('D'))));
+    strip.append(h('span', { class: 'fav-hint' }, h('span', { html: icon('pin', 12) }), 'Pin pages here for one-click access. Drag a tab here or press ', h('kbd', {}, modKey('D'))));
   }
   const tab = Tabs.activeTab();
   const more = h('button', { class: 'fav-more', title: 'More pinned pages', html: icon('chevronDown', 13) });
@@ -309,7 +309,7 @@ export function tabMenu(t, x, y) {
   showMenu(x, y, [
     { label: t.pinned ? 'Unpin' : 'Pin to Top', icon: 'pin', hint: modKey('D'), action: () => Tabs.setPinned(t, !t.pinned) },
     t.pinned ? { label: 'Rename Pin…', icon: 'compose', action: () => renamePin(t) } : null,
-    !t.pinned ? { label: 'Never Close Automatically', icon: 'lock', checked: !!t.keep, action: () => { t.keep = !t.keep; changed(); toast(t.keep ? 'This tab stays open — no auto-close, sleep or AI cleanup' : 'Auto-close can manage this tab again', { iconName: 'lock', timeout: 2200 }); } } : null,
+    !t.pinned ? { label: 'Never Close Automatically', icon: 'lock', checked: !!t.keep, action: () => { t.keep = !t.keep; changed(); toast(t.keep ? 'This tab stays open: no auto-close, sleep or AI cleanup' : 'Auto-close can manage this tab again', { iconName: 'lock', timeout: 2200 }); } } : null,
     {
       label: 'Move to Group', icon: 'folder', submenu: [
         ...groups,

@@ -146,3 +146,24 @@ export function clamp(v, lo, hi) {
 export function withTimeout(promise, ms, fallback = null) {
   return Promise.race([promise, new Promise((r) => setTimeout(() => r(fallback), ms))]);
 }
+
+export const readFileUrl = (file) => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(r.result);
+  r.onerror = () => reject(r.error);
+  r.readAsDataURL(file);
+});
+
+// Any image source → a data: URL whose longest side is at most maxSide (small PNGs stay PNG).
+export async function scaledImage(src, maxSide, quality = 0.86) {
+  const img = new Image();
+  img.src = src;
+  await img.decode();
+  const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+  const png = /^data:image\/png/i.test(src) && canvas.width * canvas.height < 600 * 600;
+  return { url: canvas.toDataURL(png ? 'image/png' : 'image/jpeg', quality), width: canvas.width, height: canvas.height };
+}

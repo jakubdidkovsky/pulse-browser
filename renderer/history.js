@@ -17,7 +17,7 @@ export function openHistory(view = 'history') {
     const items = q ? S.archive.filter((e) => e.title?.toLowerCase().includes(q) || e.url.toLowerCase().includes(q)) : S.archive;
     list.replaceChildren();
     if (!items.length) {
-      list.append(h('div', { class: 'empty-note' }, q ? 'No matches.' : 'Tabs you close — or that Pulse archives after a while — show up here, ready to reopen.'));
+      list.append(h('div', { class: 'empty-note' }, q ? 'No matches.' : 'Tabs you close, or that Pulse archives after a while, show up here ready to reopen.'));
       return;
     }
     let day = null;

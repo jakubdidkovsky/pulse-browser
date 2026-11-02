@@ -31,6 +31,7 @@ export const DEFAULT_SETTINGS = {
   // cookies: smart | reject | accept | off; permissions: ask | allow | block per kind
   privacy: {
     cookies: 'smart',
+    adblock: 'light', // built-in ad blocking: off | light | medium | high
     permissions: { location: 'ask', media: 'ask', notifications: 'ask', clipboard: 'ask', screen: 'ask', devices: 'ask' },
   },
   tabs: {
@@ -49,8 +50,9 @@ export const DEFAULT_SETTINGS = {
     screenshot: false,
     maxChars: 60000,
     mode: 'agent',
-    agentEffort: 'low',
+    agentThinking: 'auto', // 'auto' = deep for research and decisions, fast for plain actions
     agentConfirm: true,
+    agentAsk: null, // what the agent asks before doing: { send, delete, change, computer } (payments always ask)
     connectors: true, // let the agent use the user's Claude connectors / MCP servers
     computer: true, // shell + file tools in a working folder (Claude Code), every change approved
     workdir: null, // working folder for computer access (null = home)
@@ -183,3 +185,32 @@ export async function loadAll() {
   if (Array.isArray(history)) S.history = history;
   return session;
 }
+
+export const ADBLOCK_LEVELS = [['off', 'Off'], ['light', 'Light'], ['medium', 'Medium'], ['high', 'High']];
+// Older settings stored a plain on/off switch.
+export const adblockLevel = (v) => (v === false ? 'off' : v === true || v == null ? 'light' : v);
+
+// What the agent asks before doing. Payments always ask; each of these can be switched off.
+// Normal = asks about all of them, Full = none (only payments), anything else = custom.
+export const ASK_KINDS = [
+  ['send', 'Sending emails and messages', 'Emails, Slack and chat messages, posts, replies, invites.'],
+  ['delete', 'Deleting things', 'Emails, pages, events and files in your apps and on websites.'],
+  ['change', 'Creating or changing things in your apps', 'Notion pages, calendar events, documents, confirming forms on websites.'],
+  ['computer', 'Running commands and editing files', 'On this computer. rm -rf, sudo, git push --force and similar always ask.'],
+];
+export const AGENT_MODES = [['normal', 'Normal'], ['full', 'Full']];
+
+export function askBefore(kind) {
+  if (kind === 'pay') return true;
+  const ask = S.settings.ai.agentAsk;
+  if (ask && kind in ask) return ask[kind] !== false;
+  return S.settings.ai.agentConfirm !== false; // the single switch from before these settings
+}
+
+export function agentMode() {
+  const on = ASK_KINDS.map(([k]) => askBefore(k));
+  return on.every(Boolean) ? 'normal' : on.some(Boolean) ? 'custom' : 'full';
+}
+
+export const setAskBefore = (kind, on) => setSetting('ai.agentAsk', { ...Object.fromEntries(ASK_KINDS.map(([k]) => [k, askBefore(k)])), [kind]: on });
+export const setAgentMode = (mode) => setSetting('ai.agentAsk', Object.fromEntries(ASK_KINDS.map(([k]) => [k, mode !== 'full'])));

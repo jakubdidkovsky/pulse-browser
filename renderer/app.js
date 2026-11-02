@@ -70,8 +70,8 @@ function buildChrome() {
     h('div', { class: 'tb-center drag' }, address),
     h('div', { class: 'tb-right' },
       h('div', { class: 'ext-actions empty', id: 'ext-actions' }),
-      h('button', { class: 'icon-btn', id: 'btn-board', title: 'Whiteboard — draw, or let the AI sketch for you', html: icon('board', 17), onclick: (e) => boardButton(e.currentTarget) }),
-      h('button', { class: 'icon-btn', id: 'btn-split', title: 'Split view — show 2 or 4 pages side by side', html: icon('splitCols', 17), onclick: (e) => layoutMenu(e.currentTarget) }),
+      h('button', { class: 'icon-btn', id: 'btn-board', title: 'Whiteboard: draw, or let the AI sketch for you', html: icon('board', 17), onclick: (e) => boardButton(e.currentTarget) }),
+      h('button', { class: 'icon-btn', id: 'btn-split', title: 'Split view: show 2 or 4 pages side by side', html: icon('splitCols', 17), onclick: (e) => layoutMenu(e.currentTarget) }),
       h('button', { class: 'icon-btn', id: 'btn-pin', title: `Pin tab (${modKey('D')})`, html: icon('pin', 16), onclick: () => togglePin() }),
       h('button', { class: 'icon-btn', id: 'btn-more', title: 'More', html: icon('more', 17), onclick: (e) => moreMenu(e.currentTarget) }),
       h('button', { class: 'ai-toggle', id: 'btn-ai', title: `AI assistant (${modKey('E')})`, onclick: () => toggleAI() }, h('span', { html: icon('sparkles', 15) }), h('span', {}, 'Ask')),
@@ -415,7 +415,7 @@ function onDownload(d) {
   if (!prev) {
     entry.toast = toast(`Downloading ${d.filename}`, { iconName: 'download', timeout: 0, progress: pct });
   } else if (d.state === 'progressing') {
-    entry.toast?.update({ text: `${d.filename} — ${fmtBytes(d.received)}${d.total ? ` of ${fmtBytes(d.total)}` : ''}`, progress: pct });
+    entry.toast?.update({ text: `${d.filename} · ${fmtBytes(d.received)}${d.total ? ` of ${fmtBytes(d.total)}` : ''}`, progress: pct });
   } else if (d.state === 'completed') {
     entry.toast?.update({ text: `Downloaded ${d.filename}`, progress: null, action: { label: 'Show', fn: () => window.lumen.downloads.show(d.path) }, timeout: 5000 });
   } else {
@@ -545,7 +545,7 @@ async function boot() {
     renderToolbar();
     renderContent();
     const base = PRIVATE ? 'Pulse Private' : 'Pulse';
-    document.title = Tabs.activeTab()?.title ? `${Tabs.activeTab().title} — ${base}` : base;
+    document.title = Tabs.activeTab()?.title ? `${Tabs.activeTab().title} - ${base}` : base;
   });
   Tabs.on('onLoadState', () => renderToolbar());
 
@@ -566,6 +566,7 @@ async function boot() {
     const src = sourceId ? Tabs.tabByWebContents(sourceId) : null;
     Tabs.open(url, { background: !!background, afterId: src?.id || S.activeId, groupId: src && !src.pinned ? src.groupId : null });
   });
+  if (!PRIVATE) window.lumen.launchUrl().then((url) => { if (url) Tabs.open(url, { afterId: S.activeId }); });
   window.lumen.onMenuAction((action, data) => {
     if (action === 'ask-selection') ask('', { selection: data.text });
     else if (action === 'explain-selection') ask('Explain the selected text.', { send: true, selection: data.text });

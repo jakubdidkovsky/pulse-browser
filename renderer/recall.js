@@ -50,7 +50,7 @@ export function searchHistory(query = '', { days, limit = DEFAULT_LIMIT } = {}) 
 }
 
 export function formatPages(list) {
-  return list.map((p) => `- ${short(p.title, 90)} — ${short(p.url, 160)} · ${timeAgo(p.ts)}${p.visits > 1 ? ` · ${p.visits} visits` : ''}${p.closed ? ' · closed tab' : ''}`).join('\n');
+  return list.map((p) => `- ${short(p.title, 90)} - ${short(p.url, 160)} · ${timeAgo(p.ts)}${p.visits > 1 ? ` · ${p.visits} visits` : ''}${p.closed ? ' · closed tab' : ''}`).join('\n');
 }
 
 // The latest distinct pages, for the context sent with every AI request.

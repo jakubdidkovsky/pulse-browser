@@ -433,7 +433,7 @@ function applyTabRules() {
     if (!extras.length) continue;
     closeMany(extras.map((t) => t.id), {
       reason: 'auto',
-      label: `Closed ${extras.length} extra ${label} tab${extras.length > 1 ? 's' : ''} — kept the ${rule.max} you used last`,
+      label: `Closed ${extras.length} extra ${label} tab${extras.length > 1 ? 's' : ''}, kept the ${rule.max} you used last`,
     });
   }
 }

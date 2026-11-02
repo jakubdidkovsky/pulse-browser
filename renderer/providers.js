@@ -3,9 +3,9 @@ import { S } from './state.js';
 
 export const PROVIDERS = [
   // Uses an existing subscription through the vendor's own CLI.
-  { id: 'claude-code', kind: 'cli', logo: 'claude', name: 'Claude', vendor: 'Anthropic', via: 'Claude Code', sub: 'Your Claude Pro/Max login via Claude Code', bin: 'claude', install: 'https://docs.claude.com/en/docs/claude-code/setup', installCmd: 'curl -fsSL https://claude.ai/install.sh | bash', models: ['default', 'opus', 'sonnet', 'haiku'] },
+  { id: 'claude-code', kind: 'cli', logo: 'claude', name: 'Claude', vendor: 'Anthropic', via: 'Claude Code', sub: 'Your Claude Pro/Max login via Claude Code', bin: 'claude', install: 'https://docs.claude.com/en/docs/claude-code/setup', installCmd: 'curl -fsSL https://claude.ai/install.sh | bash', installCmdWin: 'irm https://claude.ai/install.ps1 | iex', models: ['default', 'opus', 'sonnet', 'haiku'] },
   { id: 'codex', kind: 'cli', logo: 'openai', name: 'ChatGPT', vendor: 'OpenAI', via: 'Codex CLI', sub: 'Your ChatGPT Plus/Pro login via Codex', bin: 'codex', install: 'https://github.com/openai/codex', installCmd: 'npm i -g @openai/codex' },
-  { id: 'cursor', kind: 'cli', logo: 'cursor', name: 'Cursor', vendor: 'Cursor', via: 'Cursor Agent', sub: 'Your Cursor login via cursor-agent', bin: 'cursor-agent', install: 'https://cursor.com/cli', installCmd: 'curl https://cursor.com/install -fsS | bash' },
+  { id: 'cursor', kind: 'cli', logo: 'cursor', name: 'Cursor', vendor: 'Cursor', via: 'Cursor Agent', sub: 'Your Cursor login via cursor-agent', bin: 'cursor-agent', install: 'https://cursor.com/cli', installCmd: 'curl https://cursor.com/install -fsS | bash', installCmdWin: "irm 'https://cursor.com/install?win32=true' | iex" },
   { id: 'gemini-cli', kind: 'cli', logo: 'gemini', name: 'Gemini', vendor: 'Google', via: 'Gemini CLI', sub: 'Your Google account via Gemini CLI', bin: 'gemini', install: 'https://github.com/google-gemini/gemini-cli', installCmd: 'npm i -g @google/gemini-cli' },
 
   // API keys.
@@ -22,6 +22,9 @@ export const PROVIDERS = [
   { id: 'web-perplexity', kind: 'web', logo: 'perplexity', name: 'Perplexity', vendor: 'Perplexity', sub: 'Sign in with your Perplexity account', url: 'https://www.perplexity.ai/', input: 'textarea, div[contenteditable="true"]' },
   { id: 'web-cursor', kind: 'web', logo: 'cursor', name: 'Cursor Web', vendor: 'Cursor', sub: 'Cursor agents in the browser', url: 'https://cursor.com/agents', input: 'textarea, div[contenteditable="true"]' },
 ];
+
+// The command that installs a CLI provider in this system's own shell (PowerShell on Windows).
+export const installCmdOf = (p) => (window.lumen.platform === 'win32' && p.installCmdWin) || p.installCmd;
 
 export const providerById = (id) => PROVIDERS.find((p) => p.id === id) || null;
 

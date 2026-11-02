@@ -1,0 +1,78 @@
+# Builds the installers and publishes them as a GitHub release.
+#   npm version patch && git push --follow-tags   → release v1.0.1 with every installer
+# Run it by hand (Actions → Release → Run workflow) to just build and download the files.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install rpmbuild
+        run: sudo apt-get update && sudo apt-get install -y rpm
+      - run: npm ci
+      - name: Build AppImage, .deb and .rpm (x64 + arm64)
+        run: npx electron-builder --linux --x64 --arm64 --publish never
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: |
+            dist/Pulse-*.AppImage
+            dist/Pulse-*.deb
+            dist/Pulse-*.rpm
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # Separate runs, so each installer carries one architecture instead of both.
+      - name: Build installer (x64)
+        run: npx electron-builder --win --x64 --publish never
+      - name: Build installer (arm64)
+        run: npx electron-builder --win --arm64 --publish never
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: |
+            dist/Pulse-Setup-x64.exe
+            dist/Pulse-Setup-arm64.exe
+          if-no-files-found: error
+
+  release:
+    needs: [linux, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: out
+          merge-multiple: true
+      - name: Checksums
+        working-directory: out
+        run: sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Pulse ${GITHUB_REF_NAME#v}" \
+            --generate-notes

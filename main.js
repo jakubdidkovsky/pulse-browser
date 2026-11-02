@@ -12,6 +12,8 @@ const agent = require('./lib/agent');
 const sites = require('./lib/sites');
 const extensions = require('./lib/extensions');
 const cookies = require('./lib/cookies');
+const claudeSpend = require('./lib/claude-spend');
+const adblock = require('./lib/adblock');
 
 const isMac = process.platform === 'darwin';
 const PARTITION = 'persist:lumen';
@@ -393,6 +395,16 @@ function cleanUserAgent(ua) {
 
 const privacySettings = () => store.read('settings', null)?.privacy || {};
 const cookieMode = () => privacySettings().cookies || 'smart';
+
+// Ad blocking follows Settings → Privacy (off / light / medium / high); re-checked whenever settings are saved.
+let adblockLevel = null;
+function syncAdblock() {
+  const v = privacySettings().adblock;
+  const level = v === false ? 'off' : v === true || v == null ? 'light' : String(v);
+  if (level === adblockLevel) return;
+  adblockLevel = level;
+  adblock.setLevel([session.fromPartition(PARTITION), session.fromPartition(PRIVATE_PARTITION)], level);
+}
 // Electron permission name -> the Privacy setting that sets its default (ask / allow / block).
 const PERMISSION_GROUP = {
   geolocation: 'location', media: 'media', notifications: 'notifications', 'clipboard-read': 'clipboard',
@@ -496,7 +508,7 @@ function createWindow({ privateMode = false } = {}) {
     visualEffectState: isMac ? 'active' : undefined,
     backgroundColor: privateMode ? '#16151d' : isMac ? '#00000000' : nativeTheme.shouldUseDarkColors ? '#1f1f22' : '#e9e9ee',
     icon: path.join(ROOT, 'assets', 'icon.png'),
-    title: privateMode ? 'Pulse — Private' : 'Pulse',
+    title: privateMode ? 'Pulse (Private)' : 'Pulse',
     webPreferences: {
       preload: path.join(ROOT, 'preload.js'),
       contextIsolation: true,
@@ -578,11 +590,15 @@ function buildMenu() {
 
 // ---------------------------------------------------------------- IPC
 
-const STORE_NAMES = new Set(['settings', 'session', 'history', 'chats', 'usage', 'boards']);
+const STORE_NAMES = new Set(['settings', 'session', 'history', 'chats', 'usage', 'boards', 'names']);
 
 function registerIpc() {
   ipcMain.handle('store:read', (_e, name) => (STORE_NAMES.has(name) ? store.read(name, null) : null));
-  ipcMain.on('store:write', (_e, name, data) => { if (STORE_NAMES.has(name)) store.write(name, data); });
+  ipcMain.on('store:write', (_e, name, data) => {
+    if (!STORE_NAMES.has(name)) return;
+    store.write(name, data);
+    if (name === 'settings') syncAdblock();
+  });
 
   const own = (e) => BrowserWindow.fromWebContents(e.sender);
   ipcMain.on('win:minimize', (e) => own(e)?.minimize());
@@ -606,6 +622,12 @@ function registerIpc() {
     try { return { ok: true, models: await ai.listModels(provider, getKey(provider), baseUrl) }; } catch (err) { return { ok: false, error: err.message }; }
   });
   ipcMain.handle('ai:detect', () => ai.detect());
+  ipcMain.handle('ai:claude-spend', (_e, since, until) => {
+    const from = Number(since);
+    const to = until == null ? Date.now() : Number(until);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return {};
+    return claudeSpend.spend(from, to).catch(() => ({}));
+  });
   ipcMain.handle('ai:login', (_e, provider) => ai.openLogin(provider));
 
   ipcMain.on('agent:start', (e, id, payload) => agent.start(e.sender, id, payload, getKey('anthropic')));
@@ -705,6 +727,11 @@ function registerIpc() {
     return res.canceled ? null : res.filePaths[0];
   });
   ipcMain.handle('app:home', () => app.getPath('home'));
+  ipcMain.handle('app:launch-url', () => {
+    const url = launchUrl;
+    launchUrl = null;
+    return url;
+  });
   ipcMain.on('open-external', (_e, url) => { if (/^(https?|mailto):/i.test(url)) shell.openExternal(url); });
   ipcMain.handle('app:info', () => ({ version: app.getVersion(), userData: app.getPath('userData'), electron: process.versions.electron, chrome: process.versions.chrome }));
 }
@@ -725,12 +752,19 @@ app.on('web-contents-created', (_e, contents) => {
   }
 });
 
+// A link Pulse was started with (default browser, `pulse-browser https://…`).
+const urlFromArgv = (argv) => argv.find((a) => /^https?:\/\//i.test(a)) || null;
+let launchUrl = urlFromArgv(process.argv);
+
 app.on('second-instance', (_e, argv) => {
-  if (!win) return;
+  const url = urlFromArgv(argv);
+  if (!alive(win)) {
+    if (url) launchUrl = url; // still starting up: the window picks it up once it's ready
+    return;
+  }
   if (win.isMinimized()) win.restore();
   win.focus();
-  const url = argv.find((a) => /^https?:\/\//i.test(a));
-  if (url) send('open-url', { url });
+  if (url) win.webContents.send('open-url', { url }); // never into a private window
 });
 
 // chrome.windows.create from an extension (e.g. a password manager's pop-out).
@@ -769,7 +803,7 @@ app.whenReady().then(async () => {
     dialog.showMessageBoxSync({
       type: 'info',
       message: 'Close Lumen first',
-      detail: 'Lumen is now called Pulse. Quit the open Lumen window, then start Pulse again — your tabs, logins, history and AI chats move over automatically.',
+      detail: 'Lumen is now called Pulse. Quit the open Lumen window, then start Pulse again. Your tabs, logins, history and AI chats move over automatically.',
     });
     app.exit(0);
     return;
@@ -780,6 +814,7 @@ app.whenReady().then(async () => {
   registerAppProtocol();
   setupSession(PARTITION);
   setupSession(PRIVATE_PARTITION, { privateMode: true });
+  syncAdblock();
   registerIpc();
   buildMenu();
   await initExtensions();

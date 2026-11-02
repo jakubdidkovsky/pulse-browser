@@ -1,6 +1,6 @@
 // First-run setup: a short Apple-style walkthrough of the choices that matter most —
 // which AI to use, what the agent may do, privacy, tab housekeeping and the look.
-import { S, setSetting, ACCENTS } from './state.js';
+import { S, setSetting, ACCENTS, ADBLOCK_LEVELS, adblockLevel, AGENT_MODES, agentMode, setAgentMode } from './state.js';
 import { h } from './util.js';
 import { icon, logo } from './icons.js';
 import { openModal, toggle, segmented, select } from './ui.js';
@@ -30,7 +30,7 @@ function welcomeStep() {
   return h('div', { class: 'wl-step wl-hello' },
     h('div', { class: 'wl-logo', html: icon('sparkles', 40) }),
     h('h1', {}, 'Welcome to Pulse'),
-    h('p', { class: 'wl-lead' }, 'A fast browser with an AI that does the work for you. Let’s set it up — it takes a minute.'),
+    h('p', { class: 'wl-lead' }, 'A fast browser with an AI that does the work for you. Let’s set it up. It takes a minute.'),
     h('div', { class: 'wl-features' },
       feature('agent', 'An agent that uses the web', 'It clicks, types and fills forms in your tabs while you watch.'),
       feature('splitGrid', 'Split view', 'Two or four pages side by side.'),
@@ -45,7 +45,7 @@ function aiStep(redraw) {
     const on = S.settings.ai.provider === p.id;
     return h('button', {
       class: `wl-ai${on ? ' on' : ''}${ready ? '' : ' off'}`,
-      title: ready ? `Use ${p.name}` : `${st.label} — set it up later in Settings → AI`,
+      title: ready ? `Use ${p.name}` : `${st.label}. Set it up later in Settings → AI.`,
       onclick: () => { if (ready) { selectProvider(p.id); redraw(); } },
     },
     h('span', { class: 'wl-ai-logo', html: logo(p.logo, 26) }),
@@ -54,7 +54,7 @@ function aiStep(redraw) {
   });
   const anyReady = PROVIDERS.some((p) => (p.kind === 'cli' || p.id === 'anthropic') && statusOf(p).cls === 'ok');
   return h('div', { class: 'wl-step' },
-    heading('sparkles', 'Which AI should work for you?', 'Your existing subscription works — Pulse uses the app you’re already signed in to. No extra API key needed.'),
+    heading('sparkles', 'Which AI should work for you?', 'Your existing subscription works: Pulse uses the app you’re already signed in to. No extra API key needed.'),
     h('div', { class: 'wl-ais' }, ...cards),
     anyReady ? null : h('p', { class: 'wl-note' }, 'Nothing installed yet. Install Claude Code (claude.ai/install) or add an API key later in Settings → AI.'),
     h('div', { class: 'wl-card' },
@@ -74,10 +74,10 @@ function agentStep(redraw) {
           (ai.workdir || '~').replace(/^\/home\/[^/]+/, '~'))) : null,
       line('bolt', 'Use my Claude connectors', 'Gmail, Calendar, Notion, Slack… connected in Claude. Sending or changing anything asks first.',
         toggle(ai.connectors !== false, (v) => setSetting('ai.connectors', v))),
-      line('warn', 'Ask before paying, sending or deleting', 'Skipped when you asked for exactly that (“pošli to”).',
-        toggle(ai.agentConfirm !== false, (v) => setSetting('ai.agentConfirm', v))),
-      line('cursor', 'Speed', 'How much the agent thinks before each step.',
-        segmented([['low', 'Fastest'], ['medium', 'Balanced'], ['high', 'Thorough']], ai.agentEffort || 'low', (v) => setSetting('ai.agentEffort', v)))));
+      line('warn', 'Permissions', 'Normal asks before paying, sending or deleting. Full does it on its own and asks only before paying.',
+        segmented(AGENT_MODES, agentMode(), (v) => setAgentMode(v))),
+      line('cursor', 'Thinking', 'Auto thinks hard when you want the best option or a comparison, and stays quick for simple clicks.',
+        segmented([['auto', 'Auto'], ['low', 'Fastest'], ['high', 'Thorough']], ai.agentThinking || 'auto', (v) => setSetting('ai.agentThinking', v)))));
 }
 
 function privacyStep() {
@@ -86,6 +86,8 @@ function privacyStep() {
   return h('div', { class: 'wl-step' },
     heading('shield', 'Privacy, without the pop-ups', 'Pulse can answer the annoying questions for you.'),
     h('div', { class: 'wl-card' },
+      line('shield', 'Block ads', 'Light keeps pages as they are and only stops ad servers. Change it any time in Settings → Privacy.',
+        segmented(ADBLOCK_LEVELS, adblockLevel(P.adblock), (v) => setSetting('privacy.adblock', v))),
       line('check', 'Cookie banners', 'Smart rejects optional cookies and accepts only where a site leaves no other choice. Works for the agent too.',
         segmented([['smart', 'Smart'], ['reject', 'Reject'], ['accept', 'Accept'], ['off', 'Off']], P.cookies || 'smart', (v) => setSetting('privacy.cookies', v))),
       line('globe', 'Sites asking for your location', null, ask('location')),
@@ -99,7 +101,7 @@ function tabsStep(redraw) {
   return h('div', { class: 'wl-step' },
     heading('layers', 'Tabs that tidy themselves', 'Everything closed can be reopened from History → Archived Tabs.'),
     h('div', { class: 'wl-card' },
-      line('eye', 'Put unused tabs to sleep', 'After 45 minutes — frees memory, the tab stays in the sidebar.',
+      line('eye', 'Put unused tabs to sleep', 'After 45 minutes. Frees memory, the tab stays in the sidebar.',
         toggle(t.sleepAfter > 0, (v) => setSetting('tabs.sleepAfter', v ? 45 : 0))),
       line('history', 'Archive tabs you haven’t opened for a day', 'Pinned tabs are never archived.',
         toggle(t.archiveAfter > 0, (v) => setSetting('tabs.archiveAfter', v ? 24 : 0))),
@@ -131,7 +133,7 @@ function doneStep(finish) {
     h('h1', {}, 'You’re all set'),
     h('p', { class: 'wl-lead' }, 'A few things worth knowing:'),
     h('div', { class: 'wl-tips' },
-      tip(`${mod}E`, 'Open the AI — ask anything or tell it what to do'),
+      tip(`${mod}E`, 'Open the AI: ask anything or tell it what to do'),
       tip('Right-click', '“Ask AI About This” sends the exact spot on the page'),
       tip(`${mod}T`, 'Command bar: open, search, switch tabs, run actions'),
       tip(h('span', { class: 'wl-kbd-icon', html: icon('splitCols', 14) }), 'The layout button next to the address bar splits the window')),

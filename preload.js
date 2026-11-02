@@ -34,6 +34,7 @@ contextBridge.exposeInMainWorld('lumen', {
     detect: () => ipcRenderer.invoke('ai:detect'),
     login: (provider) => ipcRenderer.invoke('ai:login', provider),
     onEvent: on('ai:event'),
+    claudeSpend: (since, until) => ipcRenderer.invoke('ai:claude-spend', since, until),
   },
   agent: {
     start: (id, payload) => ipcRenderer.send('agent:start', id, payload),
@@ -95,6 +96,7 @@ contextBridge.exposeInMainWorld('lumen', {
   info: () => ipcRenderer.invoke('app:info'),
   pickFolder: (start) => ipcRenderer.invoke('dialog:folder', start),
   homeDir: () => ipcRenderer.invoke('app:home'),
+  launchUrl: () => ipcRenderer.invoke('app:launch-url'),
   onShortcut: on('shortcut'),
   onOpenUrl: on('open-url'),
   onMenuAction: on('menu-action'),

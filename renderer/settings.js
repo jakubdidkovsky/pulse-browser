@@ -1,9 +1,9 @@
 // Settings window: General, Appearance, AI accounts, Groups, Privacy, Shortcuts, About.
-import { S, setSetting, ACCENTS, GROUP_COLORS, PRIVATE } from './state.js';
+import { S, setSetting, ACCENTS, GROUP_COLORS, PRIVATE, ADBLOCK_LEVELS, adblockLevel, AGENT_MODES, agentMode, setAgentMode, ASK_KINDS, askBefore, setAskBefore } from './state.js';
 import { h, SEARCH_ENGINES } from './util.js';
 import { icon, logo } from './icons.js';
 import { openModal, toggle, segmented, select, confirmDialog, toast } from './ui.js';
-import { PROVIDERS, statusOf, modelFor, prettyModel, providerById } from './providers.js';
+import { PROVIDERS, statusOf, modelFor, prettyModel, providerById, installCmdOf } from './providers.js';
 import { refreshStatus, selectProvider, cliLogin, loadModels, modelCache, serverEnabled, rememberServers } from './ai.js';
 import { editGroup, modKey } from './sidebar.js';
 import * as Tabs from './tabs.js';
@@ -92,19 +92,19 @@ const RENDER = {
       const p = providerById(S.settings.ai.provider);
       wrap.replaceChildren(
         group('Assistant',
-          row('Default AI', select(PROVIDERS.map((x) => [x.id, x.kind === 'cli' ? `${x.name} — ${x.via}` : x.kind === 'web' ? `${x.name} (web)` : x.name]), p?.id, (v) => { selectProvider(v); draw(); })),
+          row('Default AI', select(PROVIDERS.map((x) => [x.id, x.kind === 'cli' ? `${x.name} (${x.via})` : x.kind === 'web' ? `${x.name} (web)` : x.name]), p?.id, (v) => { selectProvider(v); draw(); })),
           row('Share the current page', toggle(S.settings.ai.sharePage, (v) => setSetting('ai.sharePage', v)), 'The AI sees the page text, your selection, open tabs and recent activity. You can turn it off per message.'),
           row('Include a screenshot', toggle(S.settings.ai.screenshot, (v) => setSetting('ai.screenshot', v)), 'Sends an image of the page to API providers that support vision.'),
           row('Page text limit', select([[20000, 'Short (20k chars)'], [60000, 'Standard (60k)'], [150000, 'Long (150k)'], [400000, 'Very long (400k)']], S.settings.ai.maxChars, (v) => setSetting('ai.maxChars', +v))),
           row('Claude response depth', segmented([['low', 'Fast'], ['medium', 'Balanced'], ['high', 'Deep']], S.settings.ai.effort || 'medium', (v) => setSetting('ai.effort', v)), 'Applies to the Claude API.')),
         group('Agent',
-          row('Speed vs. thoroughness', segmented([['low', 'Fastest'], ['medium', 'Balanced'], ['high', 'Thorough']], S.settings.ai.agentEffort || 'low', (v) => setSetting('ai.agentEffort', v)), 'How much the agent thinks before each step. For even more speed pick Sonnet or Haiku as the Claude Code model.'),
-          row('Computer access (Claude Code)', toggle(S.settings.ai.computer !== false, (v) => setSetting('ai.computer', v)), 'The agent can run commands and work with files in a folder you choose — like Claude Code in a terminal. Every command and file change asks first.'),
+          row('Thinking', segmented([['auto', 'Auto'], ['low', 'Fastest'], ['medium', 'Balanced'], ['high', 'Thorough']], S.settings.ai.agentThinking || 'auto', (v) => setSetting('ai.agentThinking', v)), 'Auto thinks hard when you ask it to find the best option, compare or decide: it researches like a person and shows you the result. Simple clicks stay quick.'),
+          row('Computer access (Claude Code)', toggle(S.settings.ai.computer !== false, (v) => setSetting('ai.computer', v)), 'The agent can run commands and work with files in a folder you choose, like Claude Code in a terminal. Every command and file change asks first.'),
           row('Working folder', h('button', { class: 'btn small', onclick: async () => { const d = await window.lumen.pickFolder(S.settings.ai.workdir); if (d) { setSetting('ai.workdir', d); draw(); } } }, (S.settings.ai.workdir || '~').replace(/^\/home\/[^/]+/, '~')), 'Where commands run. You can also switch it with the folder button under the chat.'),
-          row('Ask before risky clicks', toggle(S.settings.ai.agentConfirm !== false, (v) => setSetting('ai.agentConfirm', v)), 'Pay, buy, send, post, delete… the agent waits for your OK — unless you asked for exactly that (e.g. “pošli to”). Ticking boxes and choosing options never asks.'),
           row('Site memory & session files', h('button', { class: 'btn small', onclick: () => window.lumen.sites.open(null) }, 'Open folder'), 'Each website gets a folder with CONTEXT.md (what the agent learned) and full transcripts of every session.')),
+        permissionsGroup(draw),
         connectorsSection(draw),
-        h('section', { class: 'set-group' }, h('h4', {}, 'Use your subscription'), h('p', { class: 'set-note' }, 'These run the vendor’s own command-line app with the account you’re signed in to — no API key needed.'),
+        h('section', { class: 'set-group' }, h('h4', {}, 'Use your subscription'), h('p', { class: 'set-note' }, 'These run the vendor’s own command-line app with the account you’re signed in to, no API key needed.'),
           h('div', { class: 'providers' }, ...PROVIDERS.filter((x) => x.kind === 'cli').map((x) => providerCard(x, draw)))),
         h('section', { class: 'set-group' }, h('h4', {}, 'API keys'), h('p', { class: 'set-note' }, 'Keys are encrypted with your system keychain and never leave this computer except to call the provider.'),
           h('div', { class: 'providers' }, ...PROVIDERS.filter((x) => x.kind === 'api').map((x) => providerCard(x, draw)))),
@@ -118,7 +118,7 @@ const RENDER = {
 
   groups() {
     const list = h('div', { class: 'set-card' });
-    if (!S.groups.length) list.append(h('div', { class: 'empty-note' }, 'No groups yet. Groups keep related tabs together — and can automatically catch sites like notion.so.'));
+    if (!S.groups.length) list.append(h('div', { class: 'empty-note' }, 'No groups yet. Groups keep related tabs together and can automatically catch sites like notion.so.'));
     for (const g of S.groups) {
       list.append(h('div', { class: 'set-row group-row' },
         h('div', { class: 'set-label' },
@@ -141,10 +141,13 @@ const RENDER = {
     const perm = (key, label, help) => row(label,
       select([['ask', 'Ask'], ['allow', 'Allow'], ['block', 'Block']], P.permissions[key] || 'ask', (v) => setSetting(`privacy.permissions.${key}`, v)), help);
     return h('div', {},
+      group('Ads & trackers',
+        row('Block ads', segmented(ADBLOCK_LEVELS, adblockLevel(P.adblock), (v) => setSetting('privacy.adblock', v)),
+          'Light blocks ad servers only and leaves pages as they are. Medium also blocks trackers and hides empty ad boxes. High also removes pop-ups, newsletter overlays and social widgets. If a site misbehaves, go lower. Uses Ghostery’s open-source blocker with EasyList lists, updated daily.')),
       group('Cookie banners',
         row('Answer cookie banners for me',
           segmented([['smart', 'Smart'], ['reject', 'Reject'], ['accept', 'Accept'], ['off', 'Off']], P.cookies || 'smart', (v) => setSetting('privacy.cookies', v)),
-          'Smart rejects optional cookies and only accepts where a site offers nothing else (e.g. “consent or pay”). Reject never accepts — the banner is just hidden. Applies to the AI agent’s pages too. Uses DuckDuckGo’s Autoconsent rules.')),
+          'Smart rejects optional cookies and only accepts where a site offers nothing else (e.g. “consent or pay”). Reject never accepts; the banner is just hidden. Applies to the AI agent’s pages too. Uses DuckDuckGo’s Autoconsent rules.')),
       group('When a site asks for…',
         perm('location', 'Location'),
         perm('media', 'Camera & microphone'),
@@ -164,7 +167,7 @@ const RENDER = {
     const list = [
       ['New tab / command bar', modKey('T')], ['Command bar', modKey('K')], ['Edit address', modKey('L')],
       ['Close tab', modKey('W')], ['Reopen closed tab', modKey('⇧T')], ['Next / previous tab', 'Ctrl+Tab / Ctrl+⇧Tab'],
-      ['Go to tab 1–9', modKey('1…9')], ['Pin / unpin tab', modKey('D')], ['Toggle AI panel', modKey('E')],
+      ['Go to tab 1 to 9', modKey('1…9')], ['Pin / unpin tab', modKey('D')], ['Toggle AI panel', modKey('E')],
       ['Toggle sidebar', `${modKey('\\')}  or  ${modKey('⇧L')}`], ['Find in page', modKey('F')], ['History', modKey('Y')],
       ['Reload', `${modKey('R')} / F5`], ['Back / forward', `${modKey('[')} / ${modKey(']')}`], ['Zoom', `${modKey('+')} / ${modKey('−')} / ${modKey('0')}`],
       ['Copy page link', modKey('⇧C')], ['New private window', modKey('⇧N')], ['Favorites bar', modKey('⇧B')], ['Settings', modKey(',')], ['Developer tools', 'F12'],
@@ -202,7 +205,7 @@ function sitePermissions() {
       h('div', { class: 'set-label' }, h('span', {}, d.origin.replace(/^https?:\/\//, '') || 'Unknown site'), h('small', {}, PERMISSION_NAMES[d.permission] || d.permission)),
       h('div', { class: 'set-control' },
         h('span', { class: `perm-state ${d.allowed ? 'on' : 'off'}` }, d.allowed ? 'Allowed' : 'Blocked'),
-        h('button', { class: 'icon-btn small', title: 'Forget — the site will ask again', html: icon('trash', 13), onclick: async () => { await window.lumen.permissions.remove(d.key); draw(); } }))));
+        h('button', { class: 'icon-btn small', title: 'Forget. The site will ask again.', html: icon('trash', 13), onclick: async () => { await window.lumen.permissions.remove(d.key); draw(); } }))));
     if (!rows.length) rows.push(h('div', { class: 'empty-note' }, 'No site decisions yet.'));
     wrap.replaceChildren(h('h4', {}, 'Decisions for specific sites'), h('div', { class: 'set-card' }, ...rows));
   };
@@ -237,8 +240,43 @@ function usageChart() {
     return col;
   });
   return h('div', { class: 'usage-chart-wrap' },
-    h('div', { class: 'usage-chart-head' }, h('span', {}, `API-equivalent cost per day — last ${USAGE_CHART_DAYS} days`), h('small', {}, `max ${money(max)}`)),
+    h('div', { class: 'usage-chart-head' }, h('span', {}, `API-equivalent cost per day, last ${USAGE_CHART_DAYS} days`), h('small', {}, `max ${money(max)}`)),
     h('div', { class: 'usage-chart', role: 'img', 'aria-label': `Daily Pulse usage for the last ${USAGE_CHART_DAYS} days` }, ...cols, tip));
+}
+
+// What the agent asks before doing: Normal / Full presets, or each kind on its own. Payments always ask.
+function permissionsGroup(draw) {
+  const pay = toggle(true, () => {});
+  pay.disabled = true;
+  const section = group('Agent asks before…',
+    row('Preset', segmented(AGENT_MODES, agentMode(), (v) => { setAgentMode(v); draw(); }), 'Normal asks about all of these, Full only about payments.'),
+    row('Paying or transferring money', pay, 'Always asks.'),
+    ...ASK_KINDS.map(([k, label, help]) => row(label, toggle(askBefore(k), (v) => { setAskBefore(k, v); draw(); }), help)));
+  section.append(h('p', { class: 'set-note' }, 'When you ask for exactly that step (“pošli to”, “smaž to”), the agent doesn’t ask again.'));
+  return section;
+}
+
+const PLAN_WINDOWS = [['fiveHour', '5-hour limit', 5 * 3600e3], ['sevenDay', 'Weekly limit', 7 * 86400e3]];
+const pct = (f) => (f >= 0.1 ? `${Math.round(f * 100)} %` : f >= 0.0005 ? `${(f * 100).toFixed(1).replace(/\.0$/, '')} %` : '< 0.1 %');
+
+// How much of the Claude plan Pulse takes (estimated) next to the account's total use.
+function planGroup(plan) {
+  const rows = PLAN_WINDOWS.map(([key, label, span]) => {
+    const win = plan?.[key];
+    const val = h('span', { class: 'usage-row-val' }, win ? '…' : 'Not yet');
+    const r = row(label, val, win ? `${pct(win.util)} used by your whole Claude account` : 'Shows up after Pulse’s first task with Claude Code.');
+    if (win) {
+      Usage.planShare(win, span, plan.at).then((est) => {
+        val.textContent = est ? `≈ ${pct(est.pulse)} by Pulse` : 'Unknown';
+        const sub = r.querySelector('small');
+        if (est && sub) sub.textContent = `of ${pct(est.total)} used by your whole Claude account${est.perTask != null ? ` · one Pulse task ≈ ${pct(est.perTask)}` : ''}`;
+      });
+    }
+    return r;
+  });
+  const section = group('Share of your Claude plan', ...rows);
+  section.append(h('p', { class: 'set-note' }, 'Estimated: Claude reports the limits only for the whole account, so Pulse compares its own Claude Code use with all Claude Code use on this computer. claude.ai and other devices aren’t visible here.'));
+  return section;
 }
 
 function usageSection() {
@@ -250,10 +288,9 @@ function usageSection() {
     const tile = (title, value, sub) => h('div', { class: 'stat-tile' }, h('small', {}, title), h('b', {}, value), sub ? h('span', {}, sub) : null);
     const list = (title, items) => (items.length ? group(title, ...items.map((x) => row(x.name, h('span', { class: 'usage-row-val' }, money(x.usd)), runs(x)))) : null);
     const plan = S.settings.ai.planUsage;
-    const used = (w) => (w ? `${Math.round(w.util * 100)}% used` : '—');
     wrap.replaceChildren(
       h('div', { class: 'usage-top' },
-        h('p', { class: 'set-note' }, 'Only what Pulse itself uses — chats and agent tasks in this browser. Claude Code in a terminal, claude.ai and other apps are not counted.'),
+        h('p', { class: 'set-note' }, 'Only what Pulse itself uses: chats and agent tasks in this browser. Claude Code in a terminal, claude.ai and other apps are not counted.'),
         segmented([['today', 'Today'], ['week', '7 days'], ['month', '30 days']], period, (v) => { period = v; draw(); })),
       h('div', { class: 'stat-tiles' },
         tile('API-equivalent cost', money(s.usd), 'what these tokens would cost on the Claude API'),
@@ -263,9 +300,7 @@ function usageSection() {
       usageChart(),
       list('By website', Usage.breakdown(since, 'site').map((x) => ({ ...x, name: x.name === 'other' ? 'No page' : x.name }))),
       list('By model', Usage.breakdown(since, 'model').map((x) => ({ ...x, name: prettyModel(x.name) || x.name }))),
-      group('Whole Claude account (for comparison)',
-        row('5-hour limit', h('span', { class: 'usage-row-val' }, used(plan?.fiveHour)), 'Includes everything else you use with your Claude account.'),
-        row('Weekly limit', h('span', { class: 'usage-row-val' }, used(plan?.sevenDay)), 'Claude only reports these for the whole account, so Pulse shows its own usage in tokens and cost instead.')),
+      planGroup(plan),
       h('button', {
         class: 'btn small', onclick: async () => {
           if (!(await confirmDialog({ title: 'Clear usage stats?', message: 'Only Pulse’s own statistics are removed.', confirm: 'Clear', danger: true }))) return;
@@ -304,7 +339,7 @@ function extensionsSection() {
     wrap.replaceChildren(
       h('section', { class: 'set-group' }, h('h4', {}, 'Extensions'), h('div', { class: 'set-card' }, ...rows)),
       PRIVATE ? '' : h('button', { class: 'btn small', onclick: () => openTab(WEB_STORE_URL) }, h('span', { html: icon('plus', 12) }), 'Get Extensions from Chrome Web Store'),
-      h('p', { class: 'set-note' }, 'Chrome extensions install straight from the Chrome Web Store. Their buttons appear next to the address bar — click one to open it, right-click for its menu. Most extensions work; ones that need a companion app on your computer or Chrome-only features may not. Extensions don’t run in private windows.'));
+      h('p', { class: 'set-note' }, 'Chrome extensions install straight from the Chrome Web Store. Their buttons appear next to the address bar. Click one to open it, right-click for its menu. Most extensions work; ones that need a companion app on your computer or Chrome-only features may not. Extensions don’t run in private windows.'));
   };
   draw();
   return wrap;
@@ -322,7 +357,7 @@ function connectorsSection(redraw) {
     const label = sv.name.replace(/^claude\.ai /, '').replace(/^plugin:[^:]+:/, '');
     rows.push(row(label,
       toggle(serverEnabled(sv.name), (v) => setSetting('ai.serverPrefs', { ...(S.settings.ai.serverPrefs || {}), [sv.name]: v })),
-      `${sv.source === 'claudeai' ? 'claude.ai connector' : sv.source === 'plugin' ? 'Claude Code plugin — off by default' : 'MCP server'} · ${statusLabel[sv.status] || sv.status}`));
+      `${sv.source === 'claudeai' ? 'claude.ai connector' : sv.source === 'plugin' ? 'Claude Code plugin, off by default' : 'MCP server'} · ${statusLabel[sv.status] || sv.status}`));
   }
   const refresh = h('button', { class: 'btn small' }, h('span', { html: icon('reload', 12) }), servers.length ? 'Refresh' : 'Find my connectors');
   refresh.addEventListener('click', async () => {
@@ -444,8 +479,8 @@ function providerCard(p, redraw) {
       }
     } else {
       actions.append(
-        h('code', { class: 'install-cmd' }, p.installCmd),
-        h('button', { class: 'icon-btn small', title: 'Copy', html: icon('copy', 12), onclick: () => { navigator.clipboard.writeText(p.installCmd); toast('Copied', { iconName: 'check', timeout: 1200 }); } }),
+        h('code', { class: 'install-cmd' }, installCmdOf(p)),
+        h('button', { class: 'icon-btn small', title: 'Copy', html: icon('copy', 12), onclick: () => { navigator.clipboard.writeText(installCmdOf(p)); toast('Copied', { iconName: 'check', timeout: 1200 }); } }),
         h('button', { class: 'btn small', onclick: async () => { await refreshStatus(); redraw(); } }, 'Check again'));
     }
   } else {

@@ -59,7 +59,7 @@ function propertyRows(props, names) {
     const value = fmtValue(v, names);
     if (value) rows.push([humanize(k), value]);
   }
-  for (const [name, { start, end }] of dates) rows.push([name, [fmtValue(start), fmtValue(end)].filter(Boolean).join(' – ')]);
+  for (const [name, { start, end }] of dates) rows.push([name, [fmtValue(start), fmtValue(end)].filter(Boolean).join(' to ')]);
   return rows;
 }
 

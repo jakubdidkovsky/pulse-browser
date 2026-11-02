@@ -1,14 +1,14 @@
 // The whiteboard over the page area: lines, arrows, shapes, text and sticky notes — and the AI agent
 // draws here too. The toolbar button shows/hides it; × closes it (a temporary board is erased).
-import { h, $ } from './util.js';
+import { h, $, scaledImage, readFileUrl } from './util.js';
 import { icon } from './icons.js';
 import { showMenu, toast, confirmDialog } from './ui.js';
 import * as B from './board-model.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const TOOLS = [
-  ['select', 'Select & move (V)', 'cursor', 'v'], ['pen', 'Pen (P)', 'compose', 'p'], ['line', 'Line (L)', 'minus', 'l'],
-  ['arrow', 'Arrow (A) — start or end on a shape to connect it', 'arrowRight', 'a'], ['rect', 'Rectangle (R)', 'square', 'r'],
+  ['select', 'Select & move (V). Drag on empty space to select several.', 'cursor', 'v'], ['pen', 'Pen (P)', 'compose', 'p'], ['line', 'Line (L)', 'minus', 'l'],
+  ['arrow', 'Arrow (A). Start or end on a shape to connect it.', 'arrowRight', 'a'], ['rect', 'Rectangle (R)', 'square', 'r'],
   ['ellipse', 'Ellipse (O)', 'circle', 'o'], ['text', 'Text (T)', 'textT', 't'], ['sticky', 'Sticky note (N)', 'sticky', 'n'], ['eraser', 'Eraser (E)', 'eraser', 'e'],
 ];
 const PALETTE = ['ink', 'blue', 'red', 'green', 'orange', 'purple'];
@@ -23,7 +23,8 @@ const IMAGE_SHOWN = 420; // px longest side when placed
 const JPEG_QUALITY = 0.86;
 
 const ui = { root: null, svg: null, scene: null, editor: null, title: null, tools: null, empty: null, presence: null, file: null };
-const st = { tool: 'select', color: 'ink', size: 2, view: { x: 0, y: 0, zoom: 1 }, selected: null, draft: null, erasing: null, shown: new Set(), visible: false };
+// selected: ids; drafts: elements being drawn/moved, shown in place of the stored ones until committed.
+const st = { tool: 'select', color: 'ink', size: 2, view: { x: 0, y: 0, zoom: 1 }, selected: [], drafts: [], marquee: null, erasing: null, shown: new Set(), visible: false };
 
 const paint = (c) => B.COLORS[c] || c || B.COLORS.ink;
 const el = (tag, attrs = {}) => {
@@ -121,11 +122,11 @@ function shape(e, all) {
   return g;
 }
 
-function selectionBox(e, all) {
+function selectionBox(e, all, handle) {
   const b = B.bounds(e, all);
   const g = el('g', { class: 'sel' });
   g.append(el('rect', { x: b.x - 6, y: b.y - 6, width: b.w + 12, height: b.h + 12, rx: 8 }));
-  if (['rect', 'ellipse', 'sticky', 'text', 'image'].includes(e.type)) g.append(el('rect', { x: b.x + b.w + 1, y: b.y + b.h + 1, width: 10, height: 10, rx: 3, class: 'resize-handle' }));
+  if (handle && ['rect', 'ellipse', 'sticky', 'text', 'image'].includes(e.type)) g.append(el('rect', { x: b.x + b.w + 1, y: b.y + b.h + 1, width: 10, height: 10, rx: 3, class: 'resize-handle' }));
   return g;
 }
 
@@ -143,14 +144,18 @@ export function render(why) {
   ui.tools.querySelectorAll('[data-tool]').forEach((x) => x.classList.toggle('on', x.dataset.tool === st.tool));
   ui.tools.querySelectorAll('[data-color]').forEach((x) => x.classList.toggle('on', x.dataset.color === st.color));
   ui.root.dataset.tool = st.tool;
-  const all = st.draft ? [...b.elements.filter((e) => e.id !== st.draft.id), st.draft] : b.elements;
+  const over = new Map(st.drafts.map((d) => [d.id, d]));
+  const stored = new Set(b.elements.map((e) => e.id));
+  const all = [...b.elements.map((e) => over.get(e.id) || e), ...st.drafts.filter((d) => !stored.has(d.id))];
   const nodes = all.filter((e) => !st.erasing?.has(e.id)).map((e) => {
     const g = shape(e, all);
     if (why === 'ai' && !st.shown.has(e.id)) g.classList.add('fresh');
     return g;
   });
-  const sel = st.selected && all.find((e) => e.id === st.selected);
-  ui.scene.replaceChildren(...nodes, ...(sel ? [selectionBox(sel, all)] : []));
+  const sel = all.filter((e) => st.selected.includes(e.id));
+  const m = st.marquee;
+  ui.scene.replaceChildren(...nodes, ...sel.map((e) => selectionBox(e, all, sel.length === 1)),
+    ...(m ? [el('rect', { x: m.x, y: m.y, width: m.w, height: m.h, class: 'marquee' })] : []));
   st.shown = new Set(b.elements.map((e) => e.id));
   ui.empty.style.display = all.length ? 'none' : '';
   applyView();
@@ -203,20 +208,24 @@ function onDown(ev) {
   try { ui.svg.setPointerCapture(ev.pointerId); } catch { /* pointer already gone */ }
   const target = ev.target.closest?.('[data-id]')?.dataset.id || null;
   const panning = ev.button === 1 || st.space;
-  drag = { start: p, last: p, sx: ev.clientX, sy: ev.clientY, moved: false };
+  drag = { start: p, last: p, sx: ev.clientX, sy: ev.clientY, moved: false, target, shift: ev.shiftKey };
   if (panning) { drag.mode = 'pan'; return; }
   if (st.tool === 'select') {
-    if (ev.target.classList.contains('resize-handle') && st.selected) {
+    if (ev.target.classList.contains('resize-handle') && st.selected.length === 1) {
       drag.mode = 'resize';
-      drag.orig = b.elements.find((e) => e.id === st.selected);
+      drag.orig = b.elements.find((e) => e.id === st.selected[0]);
     } else if (target) {
-      st.selected = target;
+      // Shift-click adds/removes; grabbing one of several selected moves them all.
+      if (ev.shiftKey) st.selected = st.selected.includes(target) ? st.selected.filter((id) => id !== target) : [...st.selected, target];
+      else if (!st.selected.includes(target)) st.selected = [target];
       drag.mode = 'move';
-      drag.orig = b.elements.find((e) => e.id === target);
+      drag.origs = b.elements.filter((e) => st.selected.includes(e.id));
       render();
     } else {
-      st.selected = null;
-      drag.mode = 'pan';
+      // Dragging on empty space draws a selection rectangle; with Shift it adds to the selection.
+      drag.mode = 'marquee';
+      drag.base = ev.shiftKey ? st.selected : [];
+      st.selected = drag.base;
       render();
     }
     return;
@@ -232,10 +241,17 @@ function onDown(ev) {
     : st.tool === 'line' || st.tool === 'arrow' ? { ...base, type: st.tool, x: p.x, y: p.y, x2: p.x, y2: p.y, from: st.tool === 'arrow' ? anchorAt(ev) : undefined }
       : st.tool === 'text' ? { ...base, type: 'text', x: p.x, y: p.y - 12, text: '' }
         : { ...base, type: st.tool, x: p.x, y: p.y, w: 1, h: 1, color: st.tool === 'sticky' ? stickyColor() : st.color };
-  st.draft = B.normalize(raw);
+  st.drafts = [B.normalize(raw)];
   drag.mode = 'create';
   render();
 }
+
+const shifted = (o, dx, dy) => (o.type === 'path' ? { ...o, points: o.points.map(([x, y]) => [x + dx, y + dy]) }
+  : o.type === 'line' || o.type === 'arrow' ? { ...o, x: o.x + dx, y: o.y + dy, x2: o.x2 + dx, y2: o.y2 + dy }
+    : { ...o, x: o.x + dx, y: o.y + dy });
+const touches = (a, r) => a.x <= r.x + r.w && a.x + a.w >= r.x && a.y <= r.y + r.h && a.y + a.h >= r.y;
+// Removing elements also removes the connectors attached to them.
+const without = (elements, gone) => elements.filter((e) => !gone.has(e.id) && !gone.has(e.from) && !gone.has(e.to));
 
 const stickyColor = () => (st.color === 'ink' ? 'yellow' : st.color);
 const anchorAt = (ev) => {
@@ -253,31 +269,32 @@ function onMove(ev) {
   if (drag.mode === 'pan') {
     st.view = { ...st.view, x: st.view.x - (ev.movementX || 0) / st.view.zoom, y: st.view.y - (ev.movementY || 0) / st.view.zoom };
     applyView();
-  } else if (drag.mode === 'move' && drag.orig) {
-    const dx = p.x - drag.start.x;
-    const dy = p.y - drag.start.y;
-    const o = drag.orig;
-    st.draft = o.type === 'path' ? { ...o, points: o.points.map(([x, y]) => [x + dx, y + dy]) }
-      : o.type === 'line' || o.type === 'arrow' ? { ...o, x: o.x + dx, y: o.y + dy, x2: o.x2 + dx, y2: o.y2 + dy }
-        : { ...o, x: o.x + dx, y: o.y + dy };
+  } else if (drag.mode === 'move' && drag.origs?.length) {
+    st.drafts = drag.origs.map((o) => shifted(o, p.x - drag.start.x, p.y - drag.start.y));
     render();
   } else if (drag.mode === 'resize' && drag.orig) {
     const o = drag.orig;
     const w = Math.max(30, p.x - o.x);
-    st.draft = o.type === 'image' ? { ...o, w, h: w * (o.h / o.w) } : { ...o, w, ...(o.type === 'text' ? {} : { h: Math.max(24, p.y - o.y) }) };
+    st.drafts = [o.type === 'image' ? { ...o, w, h: w * (o.h / o.w) } : { ...o, w, ...(o.type === 'text' ? {} : { h: Math.max(24, p.y - o.y) }) }];
+    render();
+  } else if (drag.mode === 'marquee') {
+    const box = { x: Math.min(p.x, drag.start.x), y: Math.min(p.y, drag.start.y), w: Math.abs(p.x - drag.start.x), h: Math.abs(p.y - drag.start.y) };
+    const hit = b.elements.filter((e) => touches(B.bounds(e, b.elements), box)).map((e) => e.id);
+    st.marquee = box;
+    st.selected = [...new Set([...drag.base, ...hit])];
     render();
   } else if (drag.mode === 'erase') {
     const id = document.elementFromPoint(ev.clientX, ev.clientY)?.closest?.('[data-id]')?.dataset.id;
     if (id && !st.erasing.has(id)) { st.erasing.add(id); render(); }
-  } else if (drag.mode === 'create' && st.draft) {
-    const d = st.draft;
+  } else if (drag.mode === 'create' && st.drafts.length) {
+    const d = st.drafts[0];
     if (d.type === 'path') {
       const last = d.points.at(-1);
-      if (Math.hypot(p.x - last[0], p.y - last[1]) * st.view.zoom >= PEN_STEP) st.draft = { ...d, points: [...d.points, [p.x, p.y]] };
+      if (Math.hypot(p.x - last[0], p.y - last[1]) * st.view.zoom >= PEN_STEP) st.drafts = [{ ...d, points: [...d.points, [p.x, p.y]] }];
     } else if (d.type === 'line' || d.type === 'arrow') {
-      st.draft = { ...d, x2: p.x, y2: p.y };
+      st.drafts = [{ ...d, x2: p.x, y2: p.y }];
     } else if (d.type !== 'text') {
-      st.draft = { ...d, x: Math.min(p.x, drag.start.x), y: Math.min(p.y, drag.start.y), w: Math.abs(p.x - drag.start.x), h: Math.abs(p.y - drag.start.y) };
+      st.drafts = [{ ...d, x: Math.min(p.x, drag.start.x), y: Math.min(p.y, drag.start.y), w: Math.abs(p.x - drag.start.x), h: Math.abs(p.y - drag.start.y) }];
     }
     render();
   }
@@ -292,20 +309,30 @@ function onUp(ev) {
   if (d.mode === 'erase') {
     const gone = st.erasing;
     st.erasing = null;
-    if (gone.size) B.commit(b.elements.filter((e) => !gone.has(e.id) && !gone.has(e.from) && !gone.has(e.to)));
+    if (gone.size) B.commit(without(b.elements, gone));
     else render();
     return;
   }
-  if ((d.mode === 'move' || d.mode === 'resize') && st.draft) {
-    const next = st.draft;
-    st.draft = null;
-    if (d.moved) B.commit(b.elements.map((e) => (e.id === next.id ? next : e)));
+  if (d.mode === 'marquee') {
+    st.marquee = null;
+    render();
+    return;
+  }
+  if (d.mode === 'move' && !d.moved) {
+    // A plain click on one of several selected narrows the selection to it.
+    if (!d.shift && d.target && st.selected.length > 1) { st.selected = [d.target]; render(); }
+    return;
+  }
+  if ((d.mode === 'move' || d.mode === 'resize') && st.drafts.length) {
+    const over = new Map(st.drafts.map((x) => [x.id, x]));
+    st.drafts = [];
+    if (d.moved) B.commit(b.elements.map((e) => over.get(e.id) || e));
     else render();
     return;
   }
-  if (d.mode !== 'create' || !st.draft) return;
-  let next = st.draft;
-  st.draft = null;
+  if (d.mode !== 'create' || !st.drafts.length) return;
+  let next = st.drafts[0];
+  st.drafts = [];
   if (!d.moved) {
     // A click places a default-sized shape (or starts typing).
     if (next.type === 'rect' || next.type === 'ellipse') next = { ...next, x: next.x - 80, y: next.y - 50, w: 160, h: 100 };
@@ -314,7 +341,7 @@ function onUp(ev) {
   }
   if (next.type === 'arrow') next = { ...next, to: anchorAt(ev) };
   B.commit([...b.elements, next]);
-  st.selected = next.id;
+  st.selected = [next.id];
   if (next.type === 'text' || next.type === 'sticky') editText(next.id);
   else render();
 }
@@ -340,16 +367,16 @@ function onKey(ev) {
   if (ev.type !== 'keydown') return;
   if (mod && ev.key.toLowerCase() === 'z') { ev.preventDefault(); ev.shiftKey ? B.redo() : B.undo(); return; }
   if (mod && ev.key.toLowerCase() === 'y') { ev.preventDefault(); B.redo(); return; }
+  if (mod && ev.key.toLowerCase() === 'a') { ev.preventDefault(); st.selected = B.currentBoard().elements.map((e) => e.id); setTool('select'); return; }
   if (mod) return;
-  if ((ev.key === 'Delete' || ev.key === 'Backspace') && st.selected) {
-    const b = B.currentBoard();
-    const id = st.selected;
-    st.selected = null;
-    B.commit(b.elements.filter((e) => e.id !== id && e.from !== id && e.to !== id));
+  if ((ev.key === 'Delete' || ev.key === 'Backspace') && st.selected.length) {
+    const gone = new Set(st.selected);
+    st.selected = [];
+    B.commit(without(B.currentBoard().elements, gone));
     return;
   }
-  if (ev.key === 'Escape') { st.selected = null; setTool('select'); return; }
-  if (ev.key === 'Enter' && st.selected) { ev.preventDefault(); editText(st.selected); return; }
+  if (ev.key === 'Escape') { st.selected = []; setTool('select'); return; }
+  if (ev.key === 'Enter' && st.selected.length === 1) { ev.preventDefault(); editText(st.selected[0]); return; }
   const tool = TOOLS.find((t) => t[3] === ev.key.toLowerCase());
   if (tool) setTool(tool[0]);
 }
@@ -403,7 +430,7 @@ function build() {
     h('button', { class: 'bt-tool', title: 'Fit everything in view', html: icon('fit', 15), onclick: fitView }));
   ui.file = h('input', { type: 'file', accept: 'image/*', multiple: true, style: { display: 'none' } });
   ui.file.addEventListener('change', () => { insertFiles([...ui.file.files]); ui.file.value = ''; });
-  ui.empty = h('div', { class: 'board-empty' }, h('b', {}, 'Draw, write, or ask the AI'), h('span', {}, '“Nakresli mi na tabuli…” — the agent can sketch diagrams, plans and notes here.'));
+  ui.empty = h('div', { class: 'board-empty' }, h('b', {}, 'Draw, write, or ask the AI'), h('span', {}, 'Say “Nakresli mi na tabuli…” and the agent sketches diagrams, plans and notes here.'));
   ui.root = h('div', { id: 'board', class: 'board', tabindex: '-1' },
     h('div', { class: 'board-bar' },
       h('button', { class: 'board-menu-btn', title: 'Boards', html: icon('board', 15), onclick: (e) => boardsMenu(e.currentTarget) }),
@@ -445,25 +472,10 @@ function build() {
 
 // Any image source → a data: URL no larger than IMAGE_MAX_SIDE, plus its size when placed.
 export async function loadImage(src) {
-  const img = new Image();
-  img.src = src;
-  await img.decode();
-  const scale = Math.min(1, IMAGE_MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
-  canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
-  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-  const png = /^data:image\/png/i.test(src) && canvas.width * canvas.height < 600 * 600;
-  const shown = Math.min(1, IMAGE_SHOWN / Math.max(canvas.width, canvas.height));
-  return { src: canvas.toDataURL(png ? 'image/png' : 'image/jpeg', JPEG_QUALITY), w: Math.round(canvas.width * shown), h: Math.round(canvas.height * shown) };
+  const img = await scaledImage(src, IMAGE_MAX_SIDE, JPEG_QUALITY);
+  const shown = Math.min(1, IMAGE_SHOWN / Math.max(img.width, img.height));
+  return { src: img.url, w: Math.round(img.width * shown), h: Math.round(img.height * shown) };
 }
-
-const fileUrl = (file) => new Promise((resolve, reject) => {
-  const r = new FileReader();
-  r.onload = () => resolve(r.result);
-  r.onerror = () => reject(r.error);
-  r.readAsDataURL(file);
-});
 
 // The user's images: placed at the drop point, or in the middle of the view, side by side.
 async function insertFiles(files, at = null) {
@@ -475,7 +487,7 @@ async function insertFiles(files, at = null) {
   const added = [];
   for (const file of files.slice(0, 10)) {
     try {
-      const img = await loadImage(await fileUrl(file));
+      const img = await loadImage(await readFileUrl(file));
       added.push(B.normalize({ type: 'image', ...img, x: x - img.w / 2, y: y - img.h / 2, alt: file.name }));
       x += img.w + 24;
     } catch {
@@ -484,7 +496,7 @@ async function insertFiles(files, at = null) {
   }
   if (!added.length) return;
   B.commit([...B.currentBoard().elements, ...added]);
-  st.selected = added.at(-1).id;
+  st.selected = added.map((e) => e.id);
   setTool('select');
 }
 
@@ -502,14 +514,14 @@ export const boardVisible = () => st.visible && !!B.currentBoard();
 
 function openNew(temporary) {
   B.newBoard({ temporary });
-  st.selected = null;
+  st.selected = [];
   st.view = { x: 0, y: 0, zoom: 1 };
   showBoard(true);
 }
 
 function openSaved(id) {
   B.openBoard(id);
-  st.selected = null;
+  st.selected = [];
   showBoard(true);
   fitView();
 }
@@ -533,7 +545,7 @@ export function boardButton(anchor) {
 export function initBoardView() {
   B.onBoardChange((why) => {
     if (why === 'ai') { st.visible = true; build(); }
-    if (why === 'close') st.selected = null;
+    if (why === 'close') st.selected = [];
     render(why);
     if (why === 'ai') requestAnimationFrame(fitView);
   });

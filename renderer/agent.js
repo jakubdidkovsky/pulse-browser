@@ -1,11 +1,12 @@
 // Browser agent driver: runs the AI's tool calls in the controlled tab with a visible cursor.
-import { S, changed, GROUP_COLORS, PRIVATE, setSetting } from './state.js';
+import { S, changed, GROUP_COLORS, PRIVATE, setSetting, askBefore } from './state.js';
 import { h, $, hostOf, isStart, uid } from './util.js';
 import { icon } from './icons.js';
 import * as Tabs from './tabs.js';
 import * as Split from './split.js';
 import * as Lens from './lens.js';
 import { searchHistory, formatPages } from './recall.js';
+import { normId } from './readable.js';
 import * as Board from './board-model.js';
 import { snapshotBoard, showBoard, loadImage } from './board-view.js';
 
@@ -15,12 +16,12 @@ const MEMORY_PATH = /\/Pulse\/(MEMORY\.md|sites\/[^/]+\/CONTEXT\.md)$|(^|\/)CLAU
 // Clicks that can't be undone, grouped with the words a user would use to ask for them: a click
 // only waits for an OK when the user's own instructions for this task didn't ask for it.
 const RISK_GROUPS = [
-  { label: /\b(send|post|publish|odeslat|poslat|publikovat)\b/i, said: /\b(send|post|publish|submit|po[sš]li|po[sš]lete|poslat|ode[sš]li|ode[sš]lete|odeslat|publikuj|zve[rř]ejni)\w*/i },
-  { label: /\b(pay|buy|purchase|checkout|place order|order now|confirm (order|purchase|payment)|zaplatit|koupit|objednat)\b/i, said: /\b(pay|buy|purchase|order|checkout|zapla[tť]|kup|koupit|objednej|objednat)\w*/i },
-  { label: /\b(delete|remove|smazat|odstranit)\b/i, said: /\b(delete|remove|sma[zž]|odstra[nň]|vyma[zž])\w*/i },
-  { label: /\bsubscribe\b/i, said: /\b(subscribe|odeb[ií]r|p[rř]ihla[sš])\w*/i },
-  { label: /\b(transfer|withdraw|převést)\b/i, said: /\b(transfer|withdraw|p[rř]eve[dď]|p[rř]ev[eé]st)\w*/i },
-  { label: /\bpotvrdit\b/i, said: /\b(confirm|potvr[dď])\w*/i },
+  { kind: 'send', label: /\b(send|post|publish|odeslat|poslat|publikovat)\b/i, said: /\b(send|post|publish|submit|po[sš]li|po[sš]lete|poslat|ode[sš]li|ode[sš]lete|odeslat|publikuj|zve[rř]ejni)\w*/i },
+  { kind: 'pay', label: /\b(pay|buy|purchase|checkout|place order|order now|confirm (order|purchase|payment)|zaplatit|koupit|objednat)\b/i, said: /\b(pay|buy|purchase|order|checkout|zapla[tť]|kup|koupit|objednej|objednat)\w*/i },
+  { kind: 'delete', label: /\b(delete|remove|smazat|odstranit)\b/i, said: /\b(delete|remove|sma[zž]|odstra[nň]|vyma[zž])\w*/i },
+  { kind: 'send', label: /\bsubscribe\b/i, said: /\b(subscribe|odeb[ií]r|p[rř]ihla[sš])\w*/i },
+  { kind: 'pay', label: /\b(transfer|withdraw|převést)\b/i, said: /\b(transfer|withdraw|p[rř]eve[dď]|p[rř]ev[eé]st)\w*/i },
+  { kind: 'change', label: /\bpotvrdit\b/i, said: /\b(confirm|potvr[dď])\w*/i },
 ];
 // Shell commands that only look at things run without asking: every part of the pipeline is a
 // known read-only program, with no redirects into files, substitutions or "run something" flags.
@@ -43,6 +44,16 @@ function readOnlyCommand(command) {
 }
 
 // Ticking a box or picking an option never sends anything by itself.
+// These always ask, whatever the settings say: money leaving the account, and shell commands that delete
+// or force-change things on the computer with no way back.
+const PAYMENT_TOOL = /(^|[_-])(pay|payment|payments|charge|purchase|checkout|transfer|payout|refund|buy|order|send_money)s?([_-]|$)/i;
+const DESTRUCTIVE_COMMAND = /(^|[\s;&|(])(sudo|su|rm\s+-\w*[rf]|mkfs\S*|dd\s+if=|shred|shutdown|reboot|poweroff|git\s+push\b[^;&|]*\s(-f|--force)|git\s+reset\s+--hard|git\s+clean\s+-\w*f|chmod\s+-R|chown\s+-R)(\s|$)|\b(curl|wget)\b[^|]*\|\s*(ba|z)?sh\b|\bfind\b[^;&|]*\s-delete\b/;
+
+const SEND_TOOL = /(^|[_-])(send|post|reply|forward|publish|invite|share|schedule|comment|respond)([_-]|$)/i;
+const DELETE_TOOL = /(^|[_-])(delete|remove|trash|archive|cancel|destroy|purge)([_-]|$)/i;
+// Which "ask before" setting a connector action falls under.
+const toolKind = (tool) => (PAYMENT_TOOL.test(tool) ? 'pay' : DELETE_TOOL.test(tool) ? 'delete' : SEND_TOOL.test(tool) && !/draft/i.test(tool) ? 'send' : 'change');
+
 const SAFE_ROLES = /^(checkbox|radio|switch|option|tab|menuitemcheckbox|menuitemradio|treeitem|combobox|slider|spinbutton|textbox|searchbox|input:)/;
 const NEGATED = /\b(don'?t|do not|never|not|nikdy|ne)\s+(\S+\s+)?$/i;
 
@@ -59,6 +70,18 @@ function pageAgent() {
   const SEL = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=checkbox],[role=radio],[role=switch],[role=combobox],[role=textbox],[role=searchbox],[role=slider],[role=spinbutton],[role=treeitem],[contenteditable=""],[contenteditable="true"],[onclick],[tabindex]:not([tabindex="-1"])';
   let refs = [];
   const clean = (s, n = 80) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, n);
+  // Where a link goes, without tracking noise: random IDs like sxsrf=AKL5yDg… cost many tokens and tell
+  // the agent nothing. Readable parameters (q=, id=, page=) stay; same-site links show just the path.
+  const TRACKING_PARAM = /^(utm_|gs_|mc_|_ga)|^(gclid|gbraid|wbraid|fbclid|msclkid|igshid|yclid|dclid|ved|ei|sca_esv|sxsrf|sa|ictx|usg|oq|aqs|sourceid|ie|uact|rlz|biw|bih|dpr|spm|scm|ref_src|pvs|trk|si|_gl)$/i;
+  const OPAQUE = /[A-Za-z0-9_-]{24,}/;
+  const linkTarget = (href) => {
+    let u;
+    try { u = new URL(href, location.href); } catch { return clean(href, 70); }
+    if (!/^https?:$/.test(u.protocol)) return clean(href, 70);
+    const params = [...u.searchParams].filter(([k, v]) => !TRACKING_PARAM.test(k) && v.length <= 40 && !OPAQUE.test(v));
+    const query = params.length ? `?${params.map(([k, v]) => (v ? `${k}=${v}` : k)).join('&')}` : '';
+    return clean(`${u.origin === location.origin ? '' : u.host}${u.pathname}${query}`, 80);
+  };
   const isVisible = (el) => {
     const r = el.getBoundingClientRect();
     if (r.width < 1 || r.height < 1) return false;
@@ -109,7 +132,7 @@ function pageAgent() {
     if (exp) s += exp === 'true' ? ' expanded' : ' collapsed';
     if (el.tagName === 'A') {
       const href = el.getAttribute('href');
-      if (href && !/^javascript:/i.test(href) && href !== '#') s += ` → ${clean(href, 70)}`;
+      if (href && !/^javascript:/i.test(href) && href !== '#') s += ` → ${linkTarget(href)}`;
     }
     if (el.disabled || el.getAttribute('aria-disabled') === 'true') s += ' (disabled)';
     if (where) s += ` (${where})`;
@@ -450,8 +473,8 @@ Tabs.on('onActivate', () => overlay.layer && overlay.sync());
 
 // ---------------------------------------------------------------- run lifecycle
 
-export function beginRun(runId, { tabId, name, ui, key, task }) {
-  const run = { id: runId, tabId, name, ui, key, queue: Promise.resolve(), allowRisky: false, log: [], inbox: [], said: [task || ''] };
+export function beginRun(runId, { tabId, name, ui, key, task, images = [] }) {
+  const run = { id: runId, tabId, name, ui, key, images, queue: Promise.resolve(), allowRisky: false, log: [], inbox: [], said: [task || ''] };
   runs.set(runId, run);
   const tab = Tabs.getTab(tabId);
   if (tab) tab.agent = true;
@@ -478,7 +501,7 @@ export function steer(runId, text) {
   if (!run) return false;
   run.inbox.push(text);
   run.said.push(text);
-  overlay.status('Got your message — adjusting');
+  overlay.status('Got your message, adjusting');
   return true;
 }
 
@@ -572,7 +595,7 @@ function popupNotice(run) {
     return 'A pop-up window opened (typically a sign-in window) and is now the controlled page. Finish the step there; when it closes you are back on the original tab automatically.\n\n';
   }
   if (note === 'closed') {
-    step(run, 'layers', 'The pop-up closed — back on the tab');
+    step(run, 'layers', 'The pop-up closed, back on the tab');
     return 'The pop-up window closed; you are back on the original tab.\n\n';
   }
   return '';
@@ -663,12 +686,12 @@ async function describePage(tab, full = false) {
     tab.popup ? 'Controlled page: a pop-up window (not a tab).' : '',
     `URL: ${s.url}`,
     `Title: ${s.title}`,
-    `Scroll: ${s.scrollY}px of ${s.scrollH}px (viewport ${s.vw}×${s.vh})${s.dialog ? ' — a dialog is open' : ''}${s.focused ? ` — focused ${s.focused}` : ''}`,
-    ...opened.map((p) => `This page has a pop-up window open: "${popupLabel(p)}" (id=${p.id}) — browser_tabs switch to it to work there.`),
+    `Scroll: ${s.scrollY}px of ${s.scrollH}px (viewport ${s.vw}×${s.vh})${s.dialog ? ' · a dialog is open' : ''}${s.focused ? ` · focused ${s.focused}` : ''}`,
+    ...opened.map((p) => `This page has a pop-up window open: "${popupLabel(p)}" (id=${p.id}). Use browser_tabs switch to work there.`),
     '',
     'Interactive elements:',
     s.elements || '(none visible)',
-    s.above || s.below ? `(${s.above ? `${s.above} more above` : ''}${s.above && s.below ? ', ' : ''}${s.below ? `${s.below} more below` : ''} — scroll, or browser_snapshot with full=true)` : '',
+    s.above || s.below ? `(${s.above ? `${s.above} more above` : ''}${s.above && s.below ? ', ' : ''}${s.below ? `${s.below} more below` : ''}; scroll, or browser_snapshot with full=true)` : '',
     '',
     'Visible text:',
     s.text || '(none)',
@@ -734,9 +757,9 @@ async function pointAt(run, tab, ref) {
 }
 
 async function confirmRisky(run, label, role) {
-  if (run.allowRisky || S.settings.ai.agentConfirm === false || SAFE_ROLES.test(role || '')) return;
+  if (run.allowRisky || SAFE_ROLES.test(role || '')) return;
   const group = RISK_GROUPS.find((g) => g.label.test(label));
-  if (!group || userAsked(run.said, group.said)) return;
+  if (!group || userAsked(run.said, group.said) || !askBefore(group.kind)) return;
   overlay.status('Waiting for your OK');
   overlay.hold();
   const answer = await run.ui.confirm?.(`Click “${short(label, 60)}”?`).finally(() => overlay.release());
@@ -904,7 +927,9 @@ async function execute(run, name, args) {
         if (memory) step(run, 'pin', 'Updated memory');
         const looking = shell && readOnlyCommand(input.command);
         if (looking) step(run, 'terminal', `Command: ${short(input.command, 60)}`);
-        let ok = memory || looking || /^(Read|Glob|Grep|LS)$/.test(name) || (shell ? run.allowShell : run.allowEdits);
+        const free = !askBefore('computer') && !(shell && DESTRUCTIVE_COMMAND.test(String(input.command || '')));
+        if (free && shell && !looking) step(run, 'terminal', `Command: ${short(input.command, 60)}`);
+        let ok = memory || looking || free || /^(Read|Glob|Grep|LS)$/.test(name) || (shell ? run.allowShell : run.allowEdits);
         if (!ok) {
           overlay.status('Waiting for your OK');
           const answer = await run.ui.confirmTool?.({ name, server: 'Computer', tool: name, input });
@@ -917,18 +942,21 @@ async function execute(run, name, args) {
           : { behavior: 'deny', message: 'The user declined this. Don\'t retry it; ask what they want instead.' }));
       }
       const { server, tool } = prettyTool(name);
-      const short = name.split('__').pop() || name;
-      const readOnly = /(^|[_-])(search|list|get|read|fetch|query|find|lookup|view|retrieve|describe|count|check|status|preview)([_-]|$)/i.test(short);
-      let ok = S.settings.ai.toolAllow?.includes(name) || (S.settings.ai.autoAllowRead !== false && readOnly);
+      const toolName = name.split('__').pop() || name;
+      const input = args.input || {};
+      const sent = SLACK_MESSAGE.test(name) ? withLinkedEmails(input) : input; // the card shows how it will read
+      const readOnly = /(^|[_-])(search|list|get|read|fetch|query|find|lookup|view|retrieve|describe|count|check|status|preview)([_-]|$)/i.test(toolName);
+      let ok = S.settings.ai.toolAllow?.includes(name) || (S.settings.ai.autoAllowRead !== false && readOnly)
+        || !askBefore(toolKind(toolName));
       if (!ok) {
         overlay.status('Waiting for your OK');
-        const answer = await run.ui.confirmTool?.({ name, server, tool, input: args.input || {} });
+        const answer = await run.ui.confirmTool?.({ name, server, tool, input });
         if (answer === 'always') setSetting('ai.toolAllow', [...new Set([...(S.settings.ai.toolAllow || []), name])]);
         ok = !!answer;
         overlay.status(`${run.name} is working`);
       }
       return text(JSON.stringify(ok
-        ? { behavior: 'allow', updatedInput: args.input || {} }
+        ? { behavior: 'allow', updatedInput: sent }
         : { behavior: 'deny', message: `The user declined ${server} · ${tool}. Don't retry it; continue another way or ask.` }));
     }
     case 'tabs_settings': {
@@ -970,7 +998,7 @@ async function execute(run, name, args) {
       }
       if (args.action === 'split') {
         const kind = Split.showTabs((args.tab_ids || []).map(String), args.layout);
-        if (!kind) return fail(`split needs 2–4 tab_ids of open web pages (not new-tab pages).\n${list()}`);
+        if (!kind) return fail(`split needs 2 to 4 tab_ids of open web pages (not new-tab pages).\n${list()}`);
         step(run, 'layers', `Split the window: ${kind === 'grid' ? '2×2 grid' : kind === 'rows' ? 'stacked' : 'side by side'}`);
         return text(`Split view on (${kind}).\n\n${list()}`);
       }
@@ -1032,7 +1060,7 @@ async function execute(run, name, args) {
       const b = Board.currentBoard();
       Board.markSeen();
       step(run, 'board', `Drew on the whiteboard (${ids.length} item${ids.length === 1 ? '' : 's'})`);
-      return text(`Board "${b.title}" (${b.temporary ? 'temporary — erased when the user closes it' : 'saved'}) now has ${b.elements.length} elements. Added or updated: ${ids.join(', ') || 'none'}.${notes ? `\n\nBefore that, the user had changed the board:\n${notes}` : ''}`);
+      return text(`Board "${b.title}" (${b.temporary ? 'temporary, erased when the user closes it' : 'saved'}) now has ${b.elements.length} elements. Added or updated: ${ids.join(', ') || 'none'}.${notes ? `\n\nBefore that, the user had changed the board:\n${notes}` : ''}`);
     }
     case 'whiteboard_read': {
       const b = Board.currentBoard();
@@ -1052,7 +1080,7 @@ async function execute(run, name, args) {
       const why = await Board.waitForUser(secs * 1000, () => !runs.has(run.id) || run.inbox.length > 0);
       overlay.status(`${run.name} is working`);
       if (why === 'timeout') return text(`The user didn't change the board in ${secs} s. Wait again, add something yourself, or finish if the work is done.`);
-      if (why === 'stopped') return text('The user sent a message instead of drawing — read it and continue.');
+      if (why === 'stopped') return text('The user sent a message instead of drawing. Read it and continue.');
       return boardView(run, Board.currentBoard(), 'Saw your changes on the whiteboard');
     }
     case 'browser_history': {
@@ -1063,7 +1091,7 @@ async function execute(run, name, args) {
       return text(`${found.length} page${found.length > 1 ? 's' : ''} from the history${query ? ` matching "${query}"` : ''}:\n${formatPages(found)}`);
     }
     case 'image_search': {
-      let src = String(args.image_url || '').trim();
+      let src = attachedImage(run, String(args.image_url || '').trim());
       let rect = null;
       let source = null;
       if (!src) {
@@ -1107,6 +1135,15 @@ async function execute(run, name, args) {
       overlay.status(`${run.name} is working`);
       return text(`The user answered: ${answer}`);
     }
+    case 'name_ids': {
+      const map = {};
+      for (const [id, name] of Object.entries(args.names || {}).slice(0, 50)) {
+        const key = normId(String(id).replace(/^[a-z]+:\/\//i, ''));
+        if (/^[0-9a-f]{32}$/.test(key) && name) map[key] = String(name).slice(0, 120);
+      }
+      run.ui.names?.(map);
+      return text(`Noted ${Object.keys(map).length} name${Object.keys(map).length === 1 ? '' : 's'} for the approval card.`);
+    }
     case 'site_memory_save': {
       if (PRIVATE) return text('Private window: notes are not saved.');
       if (args.scope === 'general') {
@@ -1145,12 +1182,31 @@ async function boardView(run, b, label) {
   return { content };
 }
 
+// Slack's connector turns a bare e-mail address into a link that reads "mailto:…"; an explicit Markdown
+// link keeps the address as its text. Code and existing links are left alone.
+const SLACK_MESSAGE = /slack.*(send_message|message_draft|schedule_message|update_message)/i;
+const BARE_EMAIL = /(^|[\s(,;:])([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?=$|[\s),.;:!?])/g;
+const linkEmails = (md) => String(md)
+  .split(/(```[\s\S]*?```|`[^`\n]*`|\[[^\]]*\]\([^)]*\)|<[^>\n]*>)/)
+  .map((part, i) => (i % 2 ? part : part.replace(BARE_EMAIL, (_m, pre, mail) => `${pre}[${mail}](mailto:${mail})`)))
+  .join('');
+const withLinkedEmails = (input) => (typeof input.message === 'string' ? { ...input, message: linkEmails(input.message) } : input);
+
+// "attached:2" → the second image the user pasted into their message (as a data: URL).
+function attachedImage(run, src) {
+  const n = /^attached:(\d+)$/i.exec(src);
+  if (!n) return src;
+  const im = run.images?.[Number(n[1]) - 1];
+  if (!im) throw new Error(`There is no attached image ${n[1]}; the user attached ${run.images?.length || 0}.`);
+  return `data:${im.mime};base64,${im.data}`;
+}
+
 // Image elements from the agent: "screenshot" = the page it controls; URLs are fetched and stored.
 async function withImages(run, tab, elements) {
   const out = [];
   for (const e of elements) {
     if (e?.type !== 'image') { out.push(e); continue; }
-    let src = String(e.src || '');
+    let src = attachedImage(run, String(e.src || ''));
     if (src === 'screenshot') {
       if (!tab?.wcId) throw new Error('No page is open to take a screenshot of.');
       const shot = await window.lumen.capture(tab.wcId);
@@ -1184,11 +1240,11 @@ function tabsReport(run) {
       t.audible ? 'playing audio' : '',
       dupOf.has(t.id) ? `duplicate of id=${dupOf.get(t.id)}` : '',
     ].filter(Boolean);
-    return `- id=${t.id}${t.id === controlled ? ' [controlled]' : ''}${t.id === S.activeId ? ' [visible]' : ''} ${isStart(t.url) ? '(new tab)' : `${short(t.title, 70)} — ${short(t.url, 90)}`} · ${bits.join(' · ')}`;
+    return `- id=${t.id}${t.id === controlled ? ' [controlled]' : ''}${t.id === S.activeId ? ' [visible]' : ''} ${isStart(t.url) ? '(new tab)' : `${short(t.title, 70)} - ${short(t.url, 90)}`} · ${bits.join(' · ')}`;
   });
-  const groups = S.groups.map((g) => `- "${g.name}" (${g.color}${g.rules?.length ? `, auto-opens: ${g.rules.join(', ')}` : ''}) — ${S.tabs.filter((t) => !t.pinned && t.groupId === g.id).length} tabs`);
+  const groups = S.groups.map((g) => `- "${g.name}" (${g.color}${g.rules?.length ? `, auto-opens: ${g.rules.join(', ')}` : ''}): ${S.tabs.filter((t) => !t.pinned && t.groupId === g.id).length} tabs`);
   const opener = (p) => S.tabs.find((t) => t.wcId === p.openerId) || [...popups.values()].find((x) => x.wcId === p.openerId);
-  const pops = [...popups.values()].map((p) => `- id=${p.id}${p.id === controlled ? ' [controlled]' : ''} ${short(p.title || 'Pop-up', 70)} — ${short(p.url, 90)}${opener(p) ? ` · opened by id=${opener(p).id}` : ''}`);
+  const pops = [...popups.values()].map((p) => `- id=${p.id}${p.id === controlled ? ' [controlled]' : ''} ${short(p.title || 'Pop-up', 70)} - ${short(p.url, 90)}${opener(p) ? ` · opened by id=${opener(p).id}` : ''}`);
   const split = S.split ? `\n\nSplit view (${S.split.layout}): ${S.split.panes.map((id) => (id ? `id=${id}` : 'empty')).join(', ')}` : '';
   return `Open tabs (${S.tabs.length}):\n${lines.join('\n') || '(none)'}${split}${pops.length ? `\n\nPop-up windows (switch to control one, close to dismiss it):\n${pops.join('\n')}` : ''}\n\nGroups:\n${groups.join('\n') || '(none)'}`;
 }
