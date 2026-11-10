@@ -3,13 +3,13 @@ import { S } from './state.js';
 
 export const PROVIDERS = [
   // Uses an existing subscription through the vendor's own CLI.
-  { id: 'claude-code', kind: 'cli', logo: 'claude', name: 'Claude', vendor: 'Anthropic', via: 'Claude Code', sub: 'Your Claude Pro/Max login via Claude Code', bin: 'claude', install: 'https://docs.claude.com/en/docs/claude-code/setup', installCmd: 'curl -fsSL https://claude.ai/install.sh | bash', installCmdWin: 'irm https://claude.ai/install.ps1 | iex', models: ['default', 'opus', 'sonnet', 'haiku'] },
+  { id: 'claude-code', kind: 'cli', logo: 'claude', name: 'Claude', vendor: 'Anthropic', via: 'Claude Code', sub: 'Your Claude Pro/Max login via Claude Code', bin: 'claude', install: 'https://docs.claude.com/en/docs/claude-code/setup', installCmd: 'curl -fsSL https://claude.ai/install.sh | bash', installCmdWin: 'irm https://claude.ai/install.ps1 | iex', defaultModel: 'auto', models: ['auto', 'default', 'opus', 'sonnet', 'haiku'] },
   { id: 'codex', kind: 'cli', logo: 'openai', name: 'ChatGPT', vendor: 'OpenAI', via: 'Codex CLI', sub: 'Your ChatGPT Plus/Pro login via Codex', bin: 'codex', install: 'https://github.com/openai/codex', installCmd: 'npm i -g @openai/codex' },
   { id: 'cursor', kind: 'cli', logo: 'cursor', name: 'Cursor', vendor: 'Cursor', via: 'Cursor Agent', sub: 'Your Cursor login via cursor-agent', bin: 'cursor-agent', install: 'https://cursor.com/cli', installCmd: 'curl https://cursor.com/install -fsS | bash', installCmdWin: "irm 'https://cursor.com/install?win32=true' | iex" },
   { id: 'gemini-cli', kind: 'cli', logo: 'gemini', name: 'Gemini', vendor: 'Google', via: 'Gemini CLI', sub: 'Your Google account via Gemini CLI', bin: 'gemini', install: 'https://github.com/google-gemini/gemini-cli', installCmd: 'npm i -g @google/gemini-cli' },
 
   // API keys.
-  { id: 'anthropic', kind: 'api', logo: 'claude', name: 'Claude API', vendor: 'Anthropic', sub: 'Anthropic API key', defaultModel: 'claude-opus-5-5', models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'], keyUrl: 'https://console.anthropic.com/settings/keys', vision: true, effort: true },
+  { id: 'anthropic', kind: 'api', logo: 'claude', name: 'Claude API', vendor: 'Anthropic', sub: 'Anthropic API key', defaultModel: 'auto', models: ['auto', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'], keyUrl: 'https://console.anthropic.com/settings/keys', vision: true, effort: true },
   { id: 'openai', kind: 'api', logo: 'openai', name: 'OpenAI API', vendor: 'OpenAI', sub: 'OpenAI API key', defaultModel: 'gpt-5', baseUrl: 'https://api.openai.com/v1', keyUrl: 'https://platform.openai.com/api-keys', vision: true },
   { id: 'gemini', kind: 'api', logo: 'gemini', name: 'Gemini API', vendor: 'Google', sub: 'Google AI Studio key', defaultModel: 'gemini-2.5-flash', keyUrl: 'https://aistudio.google.com/apikey', vision: true },
   { id: 'openrouter', kind: 'api', logo: 'openrouter', name: 'OpenRouter', vendor: 'OpenRouter', sub: 'Hundreds of models, one key', defaultModel: 'openrouter/auto', baseUrl: 'https://openrouter.ai/api/v1', keyUrl: 'https://openrouter.ai/keys', vision: true },
@@ -61,7 +61,14 @@ export function modelFor(p) {
 const PRETTY = {
   'claude-opus-5-5': 'Opus 5.5', 'claude-sonnet-5-5': 'Sonnet 5.5', 'claude-haiku-5-5': 'Haiku 5.5',
   'claude-fable-5-1': 'Fable 5.1', 'claude-opus-5': 'Opus 5', 'claude-sonnet-5': 'Sonnet 5',
-  default: 'Default', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku',
+  default: 'Default', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku', auto: 'Auto',
+};
+
+// What "Auto" picks from (see autoModel in ai.js): Haiku for quick one-step jobs, Sonnet for most work,
+// Opus for research and decisions.
+export const AUTO_MODELS = {
+  'claude-code': { fast: 'haiku', balanced: 'sonnet', best: 'opus' },
+  anthropic: { fast: 'claude-haiku-5-5', balanced: 'claude-sonnet-5-5', best: 'claude-opus-5-5' },
 };
 
 export const prettyModel = (m) => PRETTY[m] || m;

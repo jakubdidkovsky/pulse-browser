@@ -4,8 +4,9 @@ import { h, $, favicon, hostOf, isStart, prettyUrl, toUrl, clamp, fmtBytes, avat
 import { icon } from './icons.js';
 import { toast, showMenu, topModal, closeMenu, popover } from './ui.js';
 import * as Tabs from './tabs.js';
-import { renderSidebar, editGroup, modKey, tidyMenu, AI_TASKS, fitFavbar } from './sidebar.js';
-import { openPalette, closePalette, isPaletteOpen, registerAction } from './palette.js';
+import { renderSidebar, editGroup, modKey, tidyMenu, AI_TASKS, fitFavbar, tabsOnTop } from './sidebar.js';
+import { buildTabstrip, renderTabstrip } from './tabstrip.js';
+import { openPalette, closePalette, isPaletteOpen, registerAction, bindLinkCompletion } from './palette.js';
 import { openHistory } from './history.js';
 import { openSettings } from './settings.js';
 import { initAI, toggleAI, ask, askAboutElement } from './ai.js';
@@ -17,6 +18,7 @@ import { openWelcome, needsSetup } from './welcome.js';
 import { initUsage } from './usage.js';
 import { initBoards, newBoard } from './board-model.js';
 import { initBoardView, boardButton, showBoard } from './board-view.js';
+import { initRemote } from './remote.js';
 
 const isMac = window.lumen.platform === 'darwin';
 
@@ -30,15 +32,16 @@ function windowControls() {
   if (isMac) return null;
   return h('div', { class: 'win-controls' },
     h('button', { class: 'wc', title: 'Minimize', onclick: () => window.lumen.win.minimize(), html: '<svg viewBox="0 0 10 10"><path d="M1.5 5h7"/></svg>' }),
-    h('button', { class: 'wc', id: 'wc-max', title: 'Maximize', onclick: () => window.lumen.win.maximize(), html: MAX_ICON }),
+    h('button', { class: 'wc wc-max', title: 'Maximize', onclick: () => window.lumen.win.maximize(), html: MAX_ICON }),
     h('button', { class: 'wc close', title: 'Close', onclick: () => window.lumen.win.close(), html: '<svg viewBox="0 0 10 10"><path d="M2 2l6 6M8 2l-6 6"/></svg>' }));
 }
 
+// One set of window buttons sits in the toolbar, another in the tab strip; CSS shows the one for the layout.
 function updateMaxButton() {
-  const b = $('#wc-max');
-  if (!b) return;
-  b.innerHTML = S.win.maximized ? RESTORE_ICON : MAX_ICON;
-  b.title = S.win.maximized ? 'Restore' : 'Maximize';
+  for (const b of document.querySelectorAll('.wc-max')) {
+    b.innerHTML = S.win.maximized ? RESTORE_ICON : MAX_ICON;
+    b.title = S.win.maximized ? 'Restore' : 'Maximize';
+  }
 }
 
 function buildChrome() {
@@ -57,8 +60,8 @@ function buildChrome() {
 
   $('#tabs-section .section-label').append(
     h('button', { class: 'tidy-btn', title: 'Tidy up tabs', onclick: (e) => tidyMenu(e.currentTarget) }, h('span', { html: icon('sparkles', 12) }), 'Tidy'));
-  $('#new-tab-row').innerHTML = `${icon('plus', 14)}<span>New Tab</span><kbd>${modKey('T')}</kbd>`;
-  $('#new-tab-row').addEventListener('click', () => openPalette({ mode: 'newtab' }));
+  $('#new-tab-row').innerHTML = `${icon('plus', 14)}<span>New Tab</span>`;
+  $('#new-tab-row').addEventListener('click', openStartTab);
 
   const address = h('button', { class: 'address', id: 'address', onclick: () => openPalette({ mode: 'navigate' }) });
   $('#toolbar').replaceChildren(
@@ -71,11 +74,12 @@ function buildChrome() {
     h('div', { class: 'tb-right' },
       h('div', { class: 'ext-actions empty', id: 'ext-actions' }),
       h('button', { class: 'icon-btn', id: 'btn-board', title: 'Whiteboard: draw, or let the AI sketch for you', html: icon('board', 17), onclick: (e) => boardButton(e.currentTarget) }),
-      h('button', { class: 'icon-btn', id: 'btn-split', title: 'Split view: show 2 or 4 pages side by side', html: icon('splitCols', 17), onclick: (e) => layoutMenu(e.currentTarget) }),
+      h('button', { class: 'icon-btn', id: 'btn-split', title: 'Split view: show 2 or 4 pages side by side (or drag a tab onto the page)', html: icon('splitCols', 17), onclick: (e) => layoutMenu(e.currentTarget) }),
       h('button', { class: 'icon-btn', id: 'btn-pin', title: `Pin tab (${modKey('D')})`, html: icon('pin', 16), onclick: () => togglePin() }),
       h('button', { class: 'icon-btn', id: 'btn-more', title: 'More', html: icon('more', 17), onclick: (e) => moreMenu(e.currentTarget) }),
       h('button', { class: 'ai-toggle', id: 'btn-ai', title: `AI assistant (${modKey('E')})`, onclick: () => toggleAI() }, h('span', { html: icon('sparkles', 15) }), h('span', {}, 'Ask')),
       windowControls()));
+  buildTabstrip({ controls: windowControls(), onNewTab: openStartTab });
   updateMaxButton();
 
   $('#toolbar').addEventListener('dblclick', (e) => { if (e.target.closest('.drag') || e.target.id === 'toolbar') window.lumen.win.maximize(); });
@@ -165,12 +169,20 @@ function greeting() {
   return hr < 5 ? 'Good night' : hr < 12 ? 'Good morning' : hr < 18 ? 'Good afternoon' : 'Good evening';
 }
 
+// A fresh tab on the start page, with its search field ready for typing.
+function openStartTab() {
+  Tabs.createTab();
+  // The UI renders on the next frame; focus once the start page is visible.
+  requestAnimationFrame(() => requestAnimationFrame(() => $('#start-page .start-input')?.focus()));
+}
+
 let startBuilt = false;
 function renderStart() {
   const el = $('#start-page');
   if (!startBuilt) {
     startBuilt = true;
     const input = h('input', { class: 'start-input', placeholder: 'Search or enter website', spellcheck: 'false' });
+    bindLinkCompletion(input);
     input.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' || !input.value.trim()) return;
       const url = toUrl(input.value, S.settings.engine);
@@ -264,16 +276,28 @@ Tabs.on('onActivate', () => { closeFind(); $('#status-bubble').classList.remove(
 
 // ---------------------------------------------------------------- sidebar / AI layout
 
+let layoutShown = null;
 function applyLayout() {
   const b = document.body;
-  b.classList.toggle('sidebar-hidden', !S.settings.sidebarVisible);
+  layoutShown = S.settings.tabLayout;
+  b.classList.toggle('tabs-top', tabsOnTop());
+  b.classList.toggle('sidebar-hidden', !tabsOnTop() && !S.settings.sidebarVisible);
   b.classList.toggle('ai-open', !!S.settings.aiVisible);
   document.documentElement.style.setProperty('--sidebar-w', `${S.settings.sidebarWidth}px`);
   document.documentElement.style.setProperty('--ai-w', `${S.settings.aiWidth}px`);
 }
 
+function setTabsOnTop(top) {
+  document.body.classList.remove('sidebar-peek');
+  setSetting('tabLayout', top ? 'top' : 'sidebar');
+}
+
 let sidebarAnim = null;
 function toggleSidebar(force) {
+  if (tabsOnTop()) { // no sidebar with tabs on top
+    toast('Tabs are on top. Switch back in ⋯ → Tabs on Top.', { iconName: 'window', timeout: 2600 });
+    return;
+  }
   const on = force ?? !S.settings.sidebarVisible;
   const body = document.body;
   if (on === S.settings.sidebarVisible && !body.classList.contains('sidebar-peek')) return;
@@ -355,6 +379,9 @@ function toggleFavbar() {
   } else {
     setSetting('favbar', S.settings.favbar === false);
   }
+  if (S.settings.favbar !== false && !S.tabs.some((t) => t.pinned)) {
+    toast(`The favorites bar appears once you pin a page (${modKey('D')})`, { iconName: 'pin', timeout: 2600 });
+  }
 }
 
 function copyUrl() {
@@ -396,10 +423,12 @@ function moreMenu(anchor) {
     },
     { type: 'separator' },
     { label: 'Keep Window on Top', icon: 'window', checked: S.settings.alwaysOnTop, action: () => { setSetting('alwaysOnTop', !S.settings.alwaysOnTop); window.lumen.win.setOnTop(S.settings.alwaysOnTop); } },
-    { label: S.settings.sidebarVisible ? 'Hide Sidebar' : 'Show Sidebar', icon: 'sidebar', hint: modKey('\\'), action: () => toggleSidebar() },
+    tabsOnTop() ? null : { label: S.settings.sidebarVisible ? 'Hide Sidebar' : 'Show Sidebar', icon: 'sidebar', hint: modKey('\\'), action: () => toggleSidebar() },
+    { label: 'Tabs on Top', icon: 'window', checked: tabsOnTop(), action: () => setTabsOnTop(!tabsOnTop()) },
     { label: 'Show Favorites Bar', icon: 'pin', hint: modKey('⇧B'), checked: S.settings.favbar !== false && S.settings.pinsLocation !== 'sidebar', action: toggleFavbar },
     { type: 'separator' },
     { label: 'History', icon: 'history', hint: modKey('Y'), action: openHistory },
+    { label: 'Downloads', icon: 'download', action: () => showDownloads(anchor) },
     { label: 'Settings', icon: 'settings', hint: modKey(','), action: () => openSettings() },
     { label: 'Developer Tools', icon: 'terminal', hint: 'F12', action: () => tab?.wv?.openDevTools(), disabled: !tab?.ready },
   ], { anchor, align: 'right' });
@@ -483,6 +512,7 @@ function registerActions() {
   A('New Private Window', 'mask', () => window.lumen.win.newPrivate(), modKey('⇧N'), 'incognito anonymous anonymni');
   A('Toggle AI Panel', 'sparkles', () => toggleAI(), modKey('E'), 'assistant chat claude gpt');
   A('Toggle Sidebar', 'sidebar', () => toggleSidebar(), modKey('\\'));
+  A('Toggle Tabs on Top', 'window', () => setTabsOnTop(!tabsOnTop()), null, 'tab bar strip layout chrome horizontal vertical sidebar nahore vlevo');
   A('Show History', 'history', openHistory, modKey('Y'));
   A('Open Settings', 'settings', () => openSettings(), modKey(','), 'preferences');
   A('AI Settings', 'key', () => openSettings('ai'), null, 'api key login claude chatgpt cursor');
@@ -541,7 +571,9 @@ async function boot() {
   bindPeek();
 
   onChange(() => {
+    if (layoutShown !== S.settings.tabLayout) applyLayout();
     renderSidebar();
+    renderTabstrip();
     renderToolbar();
     renderContent();
     const base = PRIVATE ? 'Pulse Private' : 'Pulse';
@@ -555,6 +587,7 @@ async function boot() {
   await initUsage();
   await initBoards();
   await initAI({ openSettings });
+  initRemote({ openSettings });
   if (S.settings.aiVisible) toggleAI(true);
   initExtensions();
   initSplit();
@@ -562,9 +595,11 @@ async function boot() {
   if (needsSetup() && !PRIVATE) setTimeout(openWelcome, 400);
 
   window.lumen.onShortcut((action) => handleShortcut(action));
-  window.lumen.onOpenUrl(({ url, background, sourceId }) => {
+  window.lumen.onOpenUrl(({ url, background, fromPage, sourceId }) => {
     const src = sourceId ? Tabs.tabByWebContents(sourceId) : null;
-    Tabs.open(url, { background: !!background, afterId: src?.id || S.activeId, groupId: src && !src.pinned ? src.groupId : null });
+    // Settings → Tabs: switch to links a page opens, even when it asked for a background tab.
+    const behind = !!background && !(fromPage && S.settings.tabs?.switchToNew !== false);
+    Tabs.open(url, { background: behind, afterId: src?.id || S.activeId, groupId: src && !src.pinned ? src.groupId : null });
   });
   if (!PRIVATE) window.lumen.launchUrl().then((url) => { if (url) Tabs.open(url, { afterId: S.activeId }); });
   window.lumen.onMenuAction((action, data) => {

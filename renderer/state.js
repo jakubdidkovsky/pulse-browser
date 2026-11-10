@@ -19,6 +19,8 @@ export const DEFAULT_SETTINGS = {
   accent: 'blue',
   engine: 'google',
   suggestions: true,
+  autocomplete: true, // fill in pinned pages and often visited addresses while typing (renderer/link-complete.js)
+  tabLayout: 'sidebar', // 'sidebar' = tabs in the left sidebar, 'top' = a tab strip above the toolbar like Chrome
   sidebarVisible: true,
   sidebarPeek: false,
   favbar: true,
@@ -28,6 +30,8 @@ export const DEFAULT_SETTINGS = {
   aiVisible: false,
   aiWidth: 400,
   alwaysOnTop: false,
+  // Phone remote (lib/remote.js): off until turned on; Tailscale only unless lan; awake = no system sleep.
+  remote: { enabled: false, lan: false, awake: false },
   // cookies: smart | reject | accept | off; permissions: ask | allow | block per kind
   privacy: {
     cookies: 'smart',
@@ -37,6 +41,9 @@ export const DEFAULT_SETTINGS = {
   tabs: {
     sleepAfter: 45, // minutes without use before a tab is unloaded (0 = never)
     archiveAfter: 24, // hours without use before an unpinned tab is archived (0 = never)
+    // A link a page opens in a new tab becomes the active tab, even when the click or the site asked
+    // for a background tab (Ctrl or middle click, Slack). "Open Link in Background" still stays behind.
+    switchToNew: true,
     // "Keep at most `max` tabs per site; close the extras once unused for `idle` minutes."
     // site '' = any site (each domain counted separately); otherwise a domain like notion.com.
     rules: [{ id: 'default', site: '', max: 5, idle: 10, enabled: true }],
@@ -61,6 +68,10 @@ export const DEFAULT_SETTINGS = {
     autoAllowRead: true, // read-only connector actions (search, list, get…) run without asking
     toolAllow: [], // connector tools the user chose to always allow
     knownServers: [],
+    commands: [], // saved slash commands: { id, name, description, instructions }
+    inputHeight: null, // px the message box was dragged to; null = grows with the text
+    saveNotes: false, // write every chat as a Markdown note into notesFolder (an Obsidian vault)
+    notesFolder: '',
   },
 };
 

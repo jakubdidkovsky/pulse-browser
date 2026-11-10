@@ -1,4 +1,4 @@
-// Settings window: General, Appearance, AI accounts, Groups, Privacy, Shortcuts, About.
+// Settings window: General, Appearance, AI, Commands, Usage, Remote, Extensions, Groups, Privacy, Shortcuts, About.
 import { S, setSetting, ACCENTS, GROUP_COLORS, PRIVATE, ADBLOCK_LEVELS, adblockLevel, AGENT_MODES, agentMode, setAgentMode, ASK_KINDS, askBefore, setAskBefore } from './state.js';
 import { h, SEARCH_ENGINES } from './util.js';
 import { icon, logo } from './icons.js';
@@ -11,12 +11,17 @@ import { setStartMode, editShortcut, removeShortcut, siteName } from './start.js
 import { listExtensions, removeExtension } from './extensions.js';
 import { openWelcome } from './welcome.js';
 import * as Usage from './usage.js';
+import { remoteSection } from './remote-settings.js';
+import { commandsSection } from './commands-settings.js';
+import { chatNotesGroup } from './notes-settings.js';
 
 const SECTIONS = [
   ['general', 'General', 'settings'],
   ['appearance', 'Appearance', 'palette'],
   ['ai', 'AI', 'sparkles'],
+  ['commands', 'Commands', 'slash'],
   ['usage', 'Usage', 'chart'],
+  ['remote', 'Remote', 'phone'],
   ['extensions', 'Extensions', 'puzzle'],
   ['groups', 'Groups', 'folder'],
   ['privacy', 'Privacy', 'shield'],
@@ -49,22 +54,25 @@ const group = (title, ...rows) => h('section', { class: 'set-group' }, title ? h
 
 const RENDER = {
   general() {
+    const top = S.settings.tabLayout === 'top';
     return h('div', {},
       group('Search',
         row('Search engine', select(Object.entries(SEARCH_ENGINES).map(([k, v]) => [k, v.name]), S.settings.engine, (v) => setSetting('engine', v))),
-        row('Search suggestions', toggle(S.settings.suggestions, (v) => setSetting('suggestions', v)), 'Shows suggestions from your search engine while you type.')),
+        row('Search suggestions', toggle(S.settings.suggestions, (v) => setSetting('suggestions', v)), 'Shows suggestions from your search engine while you type.'),
+        row('Autocomplete addresses', toggle(S.settings.autocomplete !== false, (v) => setSetting('autocomplete', v)), 'Fills in the rest of a pinned page or a site you visit often as you type, and finds pinned pages by name. Backspace removes the suggestion.')),
       startPage(),
       group('Pinned pages',
-        row('Show pinned pages in', segmented([['bar', 'Top bar'], ['sidebar', 'Sidebar']], S.settings.pinsLocation || 'bar', (v) => setSetting('pinsLocation', v)), 'Top bar keeps them one click away even when the sidebar is hidden.'),
+        top ? null : row('Show pinned pages in', segmented([['bar', 'Top bar'], ['sidebar', 'Sidebar']], S.settings.pinsLocation || 'bar', (v) => setSetting('pinsLocation', v)), 'Top bar keeps them one click away even when the sidebar is hidden.'),
         row('Show favorites bar', toggle(S.settings.favbar !== false, (v) => setSetting('favbar', v)), `Toggle anytime with ${modKey('⇧B')}.`)),
       group('Tabs',
+        row('Switch to links opened in a new tab', toggle(S.settings.tabs?.switchToNew !== false, (v) => setSetting('tabs.switchToNew', v)), 'When off, links opened with Ctrl-click or the middle button, or that a site like Slack opens in the background, stay behind the current tab.'),
         row('Put unused tabs to sleep after', select([[0, 'Never'], [15, '15 minutes'], [30, '30 minutes'], [45, '45 minutes'], [60, '1 hour'], [120, '2 hours']], S.settings.tabs?.sleepAfter ?? 45, (v) => setSetting('tabs.sleepAfter', +v)), 'Sleeping tabs stay in the sidebar but free their memory; they reload when you click them.'),
         row('Archive tabs not opened for', select([[0, 'Never'], [12, '12 hours'], [24, '1 day'], [72, '3 days'], [168, '1 week']], S.settings.tabs?.archiveAfter ?? 24, (v) => setSetting('tabs.archiveAfter', +v)), 'Pinned tabs are never archived. Only time while Pulse is open counts. Archived tabs are one click away in History → Archived Tabs.')),
       tabRules(),
       group('Window',
         row('Keep window on top', toggle(S.settings.alwaysOnTop, (v) => { setSetting('alwaysOnTop', v); window.lumen.win.setOnTop(v); }), 'Pins Pulse above other apps.'),
-        row('Show sidebar', toggle(S.settings.sidebarVisible, (v) => window.dispatchEvent(new CustomEvent('lumen:sidebar', { detail: v })))),
-        row('Reveal hidden sidebar on hover', toggle(S.settings.sidebarPeek, (v) => setSetting('sidebarPeek', v)), 'Slides the sidebar in when the pointer touches the left edge.')),
+        top ? null : row('Show sidebar', toggle(S.settings.sidebarVisible, (v) => window.dispatchEvent(new CustomEvent('lumen:sidebar', { detail: v })))),
+        top ? null : row('Reveal hidden sidebar on hover', toggle(S.settings.sidebarPeek, (v) => setSetting('sidebarPeek', v)), 'Slides the sidebar in when the pointer touches the left edge.')),
     );
   },
 
@@ -83,7 +91,10 @@ const RENDER = {
     return h('div', {},
       group('Theme',
         row('Appearance', segmented([['system', 'Auto'], ['light', 'Light'], ['dark', 'Dark']], S.settings.theme, (v) => { setSetting('theme', v); window.lumen.setTheme(v); })),
-        row('Accent color', accents)));
+        row('Accent color', accents)),
+      group('Layout',
+        row('Tabs', segmented([['sidebar', 'Sidebar'], ['top', 'Top']], S.settings.tabLayout === 'top' ? 'top' : 'sidebar', (v) => { document.body.classList.remove('sidebar-peek'); setSetting('tabLayout', v); }),
+          'Sidebar lists tabs and groups down the left side. Top puts them in a row above the address bar, like Chrome, with pinned pages in the favorites bar.')));
   },
 
   ai() {
@@ -102,6 +113,7 @@ const RENDER = {
           row('Computer access (Claude Code)', toggle(S.settings.ai.computer !== false, (v) => setSetting('ai.computer', v)), 'The agent can run commands and work with files in a folder you choose, like Claude Code in a terminal. Every command and file change asks first.'),
           row('Working folder', h('button', { class: 'btn small', onclick: async () => { const d = await window.lumen.pickFolder(S.settings.ai.workdir); if (d) { setSetting('ai.workdir', d); draw(); } } }, (S.settings.ai.workdir || '~').replace(/^\/home\/[^/]+/, '~')), 'Where commands run. You can also switch it with the folder button under the chat.'),
           row('Site memory & session files', h('button', { class: 'btn small', onclick: () => window.lumen.sites.open(null) }, 'Open folder'), 'Each website gets a folder with CONTEXT.md (what the agent learned) and full transcripts of every session.')),
+        chatNotesGroup(draw),
         permissionsGroup(draw),
         connectorsSection(draw),
         h('section', { class: 'set-group' }, h('h4', {}, 'Use your subscription'), h('p', { class: 'set-note' }, 'These run the vendor’s own command-line app with the account you’re signed in to, no API key needed.'),
@@ -115,6 +127,9 @@ const RENDER = {
     draw();
     return wrap;
   },
+
+  remote: remoteSection,
+  commands: commandsSection,
 
   groups() {
     const list = h('div', { class: 'set-card' });
@@ -371,6 +386,7 @@ function connectorsSection(redraw) {
   const allowed = S.settings.ai.toolAllow || [];
   return h('section', { class: 'set-group' },
     h('h4', {}, 'Connectors'),
+    h('p', { class: 'set-note' }, 'Every connector that’s on is connected at the start of each agent task. Turn off the ones Pulse doesn’t need and tasks start sooner.'),
     h('div', { class: 'set-card' }, ...rows),
     h('div', { class: 'field-row', style: { marginTop: '8px' } },
       refresh,

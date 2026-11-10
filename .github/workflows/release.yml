@@ -23,6 +23,7 @@ jobs:
       - name: Install rpmbuild
         run: sudo apt-get update && sudo apt-get install -y rpm
       - run: npm ci
+      - run: npm test
       - name: Build AppImage, .deb and .rpm (x64 + arm64)
         run: npx electron-builder --linux --x64 --arm64 --publish never
       - uses: actions/upload-artifact@v7

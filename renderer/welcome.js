@@ -136,7 +136,7 @@ function doneStep(finish) {
       tip(`${mod}E`, 'Open the AI: ask anything or tell it what to do'),
       tip('Right-click', '“Ask AI About This” sends the exact spot on the page'),
       tip(`${mod}T`, 'Command bar: open, search, switch tabs, run actions'),
-      tip(h('span', { class: 'wl-kbd-icon', html: icon('splitCols', 14) }), 'The layout button next to the address bar splits the window')),
+      tip(h('span', { class: 'wl-kbd-icon', html: icon('splitCols', 14) }), 'Drag a tab onto the page, or use the layout button next to the address bar, to split the window')),
     h('button', { class: 'btn small wl-store', onclick: () => { finish(); Tabs.open(WEB_STORE_URL, { afterId: S.activeId }); } },
       h('span', { html: icon('puzzle', 13) }), 'Add Chrome extensions'));
 }

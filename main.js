@@ -14,12 +14,15 @@ const extensions = require('./lib/extensions');
 const cookies = require('./lib/cookies');
 const claudeSpend = require('./lib/claude-spend');
 const adblock = require('./lib/adblock');
+const remote = require('./lib/remote');
+const chatNotes = require('./lib/chat-notes');
 
 const isMac = process.platform === 'darwin';
 const PARTITION = 'persist:lumen';
 const PRIVATE_PARTITION = 'lumen-private'; // in-memory: nothing reaches the disk
 const IMAGE_FETCH_TIMEOUT = 8000; // ms
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+const MAX_SAVE_CHARS = 64 * 1024 * 1024;
 const ROOT = __dirname;
 
 app.setName('Pulse');
@@ -109,6 +112,7 @@ function send(channel, ...args) {
 const VENDOR = {
   'marked.js': 'node_modules/marked/lib/marked.esm.js',
   'purify.js': 'node_modules/dompurify/dist/purify.es.mjs',
+  'dagre.js': 'node_modules/@dagrejs/dagre/dist/dagre.esm.js',
 };
 
 function resolveAsset(pathname) {
@@ -350,7 +354,8 @@ function setupGuest(contents, { shortcuts = true } = {}) {
         },
       };
     }
-    sendTo(contents, 'open-url', { url, background: disposition === 'background-tab', sourceId: contents.id });
+    // fromPage: the page (or a modified click in it) chose the disposition, not a menu item of Pulse.
+    sendTo(contents, 'open-url', { url, background: disposition === 'background-tab', fromPage: true, sourceId: contents.id });
     return { action: 'deny' };
   });
   contents.on('did-create-window', (w) => registerPopup(w, contents));
@@ -597,7 +602,10 @@ function registerIpc() {
   ipcMain.on('store:write', (_e, name, data) => {
     if (!STORE_NAMES.has(name)) return;
     store.write(name, data);
-    if (name === 'settings') syncAdblock();
+    if (name === 'settings') {
+      syncAdblock();
+      remote.sync(data?.remote);
+    }
   });
 
   const own = (e) => BrowserWindow.fromWebContents(e.sender);
@@ -726,7 +734,33 @@ function registerIpc() {
     });
     return res.canceled ? null : res.filePaths[0];
   });
+  // Settings → AI → Save chats to Obsidian: the UI sends finished chats and they are written as Markdown notes.
+  ipcMain.handle('notes:save', (_e, folder, chats) => {
+    try {
+      return { ok: true, saved: chatNotes.saveNotes(folder, chats, { user: chatNotes.userName() }) };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('notes:default-folder', () => chatNotes.defaultFolder());
   ipcMain.handle('app:home', () => app.getPath('home'));
+  // Saves text the UI made (a whiteboard as a .drawio file) where the user picks in a Save dialog.
+  ipcMain.handle('file:save', async (e, name, text) => {
+    if (typeof text !== 'string' || text.length > MAX_SAVE_CHARS) return { ok: false, error: 'Nothing to save.' };
+    const fileName = path.basename(String(name || 'Untitled')).replace(/[\\/:*?"<>|]+/g, ' ').trim() || 'Untitled';
+    const ext = path.extname(fileName).slice(1) || 'txt';
+    const res = await dialog.showSaveDialog(BrowserWindow.fromWebContents(e.sender) || undefined, {
+      defaultPath: path.join(app.getPath('documents'), fileName),
+      filters: [{ name: ext === 'drawio' ? 'draw.io diagram' : ext.toUpperCase(), extensions: [ext] }],
+    });
+    if (res.canceled || !res.filePath) return { ok: false };
+    try {
+      await fs.promises.writeFile(res.filePath, text, 'utf8');
+      return { ok: true, path: res.filePath };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
   ipcMain.handle('app:launch-url', () => {
     const url = launchUrl;
     launchUrl = null;
@@ -816,15 +850,23 @@ app.whenReady().then(async () => {
   setupSession(PRIVATE_PARTITION, { privateMode: true });
   syncAdblock();
   registerIpc();
+  remote.init({
+    mainWindow: () => (alive(win) ? win : null),
+    notify: (channel, ...args) => { for (const { win: w, privateMode } of uiWindows.values()) if (!privateMode && alive(w)) w.webContents.send(channel, ...args); },
+  });
   buildMenu();
   await initExtensions();
   createWindow();
+  remote.sync(settings?.remote);
   if (settings?.alwaysOnTop) win.setAlwaysOnTop(true, 'floating');
 
   app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
 });
 
-app.on('before-quit', () => store.flush());
+app.on('before-quit', () => {
+  remote.shutdown();
+  store.flush();
+});
 app.on('window-all-closed', () => {
   store.flush();
   if (!isMac) app.quit();

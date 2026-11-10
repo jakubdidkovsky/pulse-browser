@@ -5,21 +5,30 @@ import { icon } from './icons.js';
 import { showMenu, openModal, confirmDialog, toast } from './ui.js';
 import * as Tabs from './tabs.js';
 import { openPalette } from './palette.js';
-import { openInSplit, removeTabFromSplit } from './split.js';
+import { openInSplit, removeTabFromSplit, startTabDrag, endTabDrag } from './split.js';
 
 let dragId = null;
 
+export const isDraggingTab = () => !!dragId;
+export const tabsOnTop = () => S.settings.tabLayout === 'top';
+
 export function renderSidebar() {
   if (dragId) return; // don't rebuild under an active drag
-  const inBar = S.settings.pinsLocation !== 'sidebar';
+  const top = tabsOnTop(); // tabs live in the strip above the toolbar (renderer/tabstrip.js); pins in the bar
+  const inBar = top || S.settings.pinsLocation !== 'sidebar';
   document.body.classList.toggle('pins-in-bar', inBar);
-  document.body.classList.toggle('favbar-on', inBar && S.settings.favbar !== false);
+  // The bar only takes space once something is pinned; while a tab is dragged it shows up as a drop target.
+  const wanted = inBar && S.settings.favbar !== false;
+  const hasPins = S.tabs.some((t) => t.pinned);
+  document.body.classList.toggle('favbar-on', wanted && hasPins);
+  document.body.classList.toggle('favbar-empty', wanted && !hasPins);
   if (inBar) {
     $('#pinned').replaceChildren();
     renderFavbar();
   } else {
     renderPinned();
   }
+  if (top) return;
   renderGroups();
   renderLoose();
 }
@@ -182,32 +191,49 @@ function renderLoose() {
   bindDrop($('#tabs-section'), { groupId: null });
 }
 
-function tabRow(t) {
+// The tab's look in a list: 'tab' rows in the sidebar, 'ttab' in the strip on top.
+export function tabAttrs(t, cls) {
   const sleeping = !t.wv && !isStart(t.url) && t.id !== S.activeId;
-  const row = h('div', {
-    class: `tab${t.id === S.activeId ? ' active' : ''}${t.loading ? ' loading' : ''}${sleeping ? ' sleeping' : ''}`,
+  return {
+    class: `${cls}${t.id === S.activeId ? ' active' : ''}${t.loading ? ' loading' : ''}${sleeping ? ' sleeping' : ''}`,
     draggable: 'true',
     title: `${t.title}\n${t.url}\nLast used: ${Tabs.lastUsedLabel(t)}${sleeping ? ' · sleeping' : ''}`,
     dataset: { id: t.id },
-  });
-  const lead = h('span', { class: 'tab-icon' }, t.loading ? h('span', { class: 'spinner' }) : isStart(t.url) ? h('span', { class: 'fav-blank', html: icon('search', 12) }) : favicon(t, 16));
-  row.append(lead, h('span', { class: 'tab-title' }, t.title || hostOf(t.url) || 'New Tab'));
-  if (t.keep) row.append(h('span', { class: 'tab-keep', title: 'Never closed automatically', html: icon('lock', 11) }));
-  if (S.split?.panes.includes(t.id)) row.append(h('span', { class: 'tab-split', title: 'Shown in split view', html: icon(S.split.layout === 'grid' ? 'splitGrid' : S.split.layout === 'rows' ? 'splitRows' : 'splitCols', 12) }));
+  };
+}
+
+function tabRow(t) {
+  const row = h('div', tabAttrs(t, 'tab'));
+  row.append(tabIcon(t), h('span', { class: 'tab-title' }, t.title || hostOf(t.url) || 'New Tab'), ...tabExtras(t, row));
+  bindTabEvents(row, t);
+  return row;
+}
+
+export const tabIcon = (t) => h('span', { class: 'tab-icon' },
+  t.loading ? h('span', { class: 'spinner' }) : isStart(t.url) ? h('span', { class: 'fav-blank', html: icon('search', 12) }) : favicon(t, 16));
+
+// Lock, split, agent, sound and close after a tab's title, in the sidebar and in the strip on top.
+export function tabExtras(t, row) {
+  const out = [];
+  if (t.keep) out.push(h('span', { class: 'tab-keep', title: 'Never closed automatically', html: icon('lock', 11) }));
+  if (S.split?.panes.includes(t.id)) out.push(h('span', { class: 'tab-split', title: 'Shown in split view', html: icon(S.split.layout === 'grid' ? 'splitGrid' : S.split.layout === 'rows' ? 'splitRows' : 'splitCols', 12) }));
   if (t.agent) {
     row.classList.add('agent');
-    row.append(h('span', { class: 'tab-agent', title: 'The AI agent is controlling this tab', html: icon('agent', 13) }));
+    out.push(h('span', { class: 'tab-agent', title: 'The AI agent is controlling this tab', html: icon('agent', 13) }));
   }
   if (t.audible || t.muted) {
-    row.append(h('button', { class: 'row-btn audio', title: t.muted ? 'Unmute' : 'Mute', html: icon(t.muted ? 'mute' : 'volume', 13), onclick: (e) => { e.stopPropagation(); Tabs.toggleMute(t); } }));
+    out.push(h('button', { class: 'row-btn audio', title: t.muted ? 'Unmute' : 'Mute', html: icon(t.muted ? 'mute' : 'volume', 13), onclick: (e) => { e.stopPropagation(); Tabs.toggleMute(t); } }));
   }
-  row.append(h('button', { class: 'row-btn close', title: 'Close tab', html: icon('x', 12), onclick: (e) => { e.stopPropagation(); Tabs.closeTab(t.id); } }));
+  out.push(h('button', { class: 'row-btn close', title: 'Close tab', html: icon('x', 12), onclick: (e) => { e.stopPropagation(); Tabs.closeTab(t.id); } }));
+  return out;
+}
+
+export function bindTabEvents(row, t) {
   row.addEventListener('click', () => Tabs.activate(t.id));
   row.addEventListener('auxclick', (e) => { if (e.button === 1) Tabs.closeTab(t.id); });
   row.addEventListener('contextmenu', (e) => { e.preventDefault(); tabMenu(t, e.clientX, e.clientY); });
   bindDrag(row, t);
   bindDrop(row, { beforeTab: t });
-  return row;
 }
 
 // ---------------------------------------------------------------- drag & drop
@@ -219,8 +245,10 @@ function bindDrag(el, tab) {
     e.dataTransfer.setData('text/uri-list', tab.url);
     e.dataTransfer.setData('text/plain', tab.url);
     document.body.classList.add('dragging-tab');
+    startTabDrag(tab); // the page area becomes a drop target for split view
   });
   el.addEventListener('dragend', () => {
+    endTabDrag();
     dragId = null;
     document.body.classList.remove('dragging-tab');
     document.querySelectorAll('.drop-target, .drop-before').forEach((x) => x.classList.remove('drop-target', 'drop-before'));
@@ -228,7 +256,7 @@ function bindDrag(el, tab) {
   });
 }
 
-function bindDrop(el, target) {
+export function bindDrop(el, target) {
   if (el.dataset.dropBound) return;
   el.dataset.dropBound = '1';
   const cls = target.beforeTab ? 'drop-before' : 'drop-target';
@@ -334,7 +362,7 @@ export function tabMenu(t, x, y) {
   ]);
 }
 
-function groupMenu(g, anchor, x, y) {
+export function groupMenu(g, anchor, x, y) {
   const items = [
     { label: 'Edit Group…', icon: 'compose', action: () => editGroup(g) },
     { label: 'New Tab in Group', icon: 'plus', action: () => openPalette({ mode: 'newtab', groupId: g.id }) },

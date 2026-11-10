@@ -12,6 +12,7 @@ export const PRICES = {
   'claude-opus-5-5': [4, 20, 0.2], 'claude-opus-5': [5, 25, 0.5],
   'claude-sonnet-5-5': [2, 10, 0.2], 'claude-sonnet-5': [2, 10, 0.2],
   'claude-haiku-5-5': [0.1, 0.5, 0.01],
+  opus: [4, 20, 0.2], sonnet: [2, 10, 0.2], haiku: [0.1, 0.5, 0.01], // Claude Code aliases
 };
 
 // Cache writes cost 1.25× input with the API's 5-minute cache and 2× with Claude Code's 1-hour cache.

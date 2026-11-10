@@ -4,6 +4,8 @@ import { h, $, toUrl, looksLikeUrl, hostOf, prettyUrl, favicon, isStart, SEARCH_
 import { icon } from './icons.js';
 import { closeMenu } from './ui.js';
 import * as Tabs from './tabs.js';
+import { pinLabel } from './sidebar.js';
+import { linkIndex, completeLink, leftPinnedSite, returnsToPin } from './link-complete.js';
 
 let state = null;
 const actions = [];
@@ -45,7 +47,7 @@ export function openPalette({ mode = 'newtab', groupId = null, query = '' } = {}
   requestAnimationFrame(() => layer.classList.add('in'));
 
   state = { mode, groupId, input, list, layer, items: [], sel: 0, suggestions: [], suggestFor: '' };
-  input.addEventListener('input', () => { state.sel = 0; render(); fetchSuggestions(); });
+  state.comp = bindLinkCompletion(input, () => { if (!state) return; state.sel = 0; render(); fetchSuggestions(); });
   input.addEventListener('keydown', onKey);
   render();
   setTimeout(() => { input.focus(); input.select(); }, 10);
@@ -60,12 +62,15 @@ export function closePalette() {
   Tabs.activeTab()?.wv?.focus();
 }
 
+// What the user typed, without the part autocomplete filled in.
+const typedText = () => (state.comp.link ? state.comp.typed : state.input.value);
+
 const fetchSuggestions = debounce(async () => {
   if (!state || !S.settings.suggestions) return;
-  const q = state.input.value.trim();
+  const q = typedText().trim();
   if (!q || looksLikeUrl(q) || q.length < 2) { state.suggestions = []; return; }
   const res = await window.lumen.suggest(q, S.settings.engine);
-  if (!state || state.input.value.trim() !== q) return;
+  if (!state || typedText().trim() !== q) return;
   state.suggestions = res.filter((s) => s.toLowerCase() !== q.toLowerCase());
   state.suggestFor = q;
   render();
@@ -79,8 +84,9 @@ function score(text, q) {
 }
 
 function buildItems() {
-  const raw = state.input.value;
+  const raw = typedText();
   const q = raw.trim().toLowerCase();
+  const { link } = state.comp;
   const sections = [];
   const push = (title, items) => { if (items.length) sections.push({ title, items }); };
 
@@ -99,7 +105,7 @@ function buildItems() {
     return sections;
   }
 
-  const top = [];
+  const top = link ? [linkItem(link)] : [];
   if (looksLikeUrl(raw)) {
     top.push({ kind: 'url', title: prettyUrl(toUrl(raw, S.settings.engine)), sub: 'Open website', iconName: 'globe', run: (alt) => go(toUrl(raw, S.settings.engine), alt) });
   } else {
@@ -109,8 +115,8 @@ function buildItems() {
   push('', top);
 
   const tabs = S.tabs
-    .map((t) => ({ t, s: Math.max(score(t.title, q), score(t.url, q)) }))
-    .filter((x) => x.s > 0 && x.t.id !== S.activeId)
+    .map((t) => ({ t, s: Math.max(score(t.title, q), score(t.url, q), t.pinned ? score(pinLabel(t), q) : 0) }))
+    .filter((x) => x.s > 0 && x.t.id !== S.activeId && x.t.id !== link?.id)
     .sort((a, b) => b.s - a.s)
     .slice(0, 5)
     .map((x) => tabItem(x.t));
@@ -155,6 +161,25 @@ function buildItems() {
 
 const tabItem = (t) => ({ kind: 'tab', title: t.title || hostOf(t.url), sub: prettyUrl(t.url), tab: t, hint: 'Switch', run: () => { closePalette(); Tabs.activate(t.id); } });
 const histItem = (e) => ({ kind: 'history', title: e.title || e.url, sub: prettyUrl(e.url), entry: e, run: (alt) => go(e.url, alt) });
+
+// The autocompleted link: a pinned page switches to its tab (Shift opens a fresh copy), anything else opens.
+function linkItem(link) {
+  const pin = link.pinned && Tabs.getTab(link.id);
+  return {
+    kind: 'url',
+    title: link.pinned ? link.label || link.address : link.address,
+    sub: link.pinned ? `Pinned page · ${link.address}` : link.title !== link.address ? link.title : 'Open website',
+    entry: { favicon: link.favicon, title: link.label || link.address, url: link.url },
+    hint: pin && pin.id !== S.activeId ? 'Switch' : null,
+    run: (alt) => {
+      if (!pin || alt) { go(link.url, alt); return; }
+      const back = returnsToPin({ pinnedUrl: link.url, tabUrl: pin.url, active: pin.id === S.activeId });
+      closePalette();
+      Tabs.activate(pin.id);
+      if (back) Tabs.navigate(pin, link.url);
+    },
+  };
+}
 
 function go(url, alt) {
   const { mode, groupId } = state;
@@ -210,10 +235,60 @@ function onKey(e) {
   } else if (e.key === 'Tab') {
     e.preventDefault();
     const it = state.items[state.sel];
-    if (it?.sub && (it.kind === 'history' || it.kind === 'tab')) state.input.value = it.sub;
+    const { link } = state.comp;
+    if (link && state.sel === 0) {
+      if (!link.rest) state.input.value = link.address; // a pinned page found by its name
+      state.input.setSelectionRange(state.input.value.length, state.input.value.length);
+    } else if (it?.sub && (it.kind === 'history' || it.kind === 'tab')) state.input.value = it.sub;
     else if (it && it.kind === 'search') state.input.value = it.title;
+    state.comp.typed = state.input.value;
+    state.comp.link = null;
     render();
   }
+}
+
+// ---------------------------------------------------------------- address autocomplete (Settings → General)
+
+// A pin that left for another site is named after its pinned site (or its custom name) and shows that site's icon,
+// so a GitHub pin now on Drive isn't offered as "ROS Bags" and typing "ros" doesn't pull it back to GitHub.
+function pinSource(t) {
+  const url = t.pinnedUrl || t.url;
+  const away = leftPinnedSite(t.pinnedUrl, t.url);
+  const host = hostOf(url);
+  const favicon = away ? S.history.find((e) => e.favicon && hostOf(e.url) === host)?.favicon || null : t.favicon;
+  return { id: t.id, url, label: pinLabel(away ? { ...t, title: '' } : t), favicon };
+}
+
+const linkSources = () => ({
+  pinned: S.tabs.filter((t) => t.pinned).map(pinSource),
+  history: S.history,
+});
+
+// Fills in the rest of a pinned page or an often visited address while typing at the end of the field. The added part
+// stays selected, so typing on replaces it and Backspace removes it; → or End keeps it. Used by the command bar and the
+// start page. Returns its live state: { typed: what was typed, link: the suggestion or null }.
+export function bindLinkCompletion(input, onUpdate = () => {}) {
+  const comp = { typed: input.value, link: null };
+  let index = null;
+  input.addEventListener('focus', () => { index = null; }); // pins and history may have changed since
+  input.addEventListener('input', (e) => {
+    comp.typed = input.value;
+    comp.link = null;
+    const atEnd = input.selectionEnd === input.value.length;
+    if (S.settings.autocomplete !== false && e.inputType === 'insertText' && !e.isComposing && atEnd) {
+      index ??= linkIndex(linkSources());
+      comp.link = completeLink(index, input.value);
+      if (comp.link?.rest) {
+        input.value = comp.typed + comp.link.rest;
+        input.setSelectionRange(comp.typed.length, input.value.length);
+      }
+    }
+    onUpdate(comp);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (comp.link?.rest && (e.key === 'ArrowRight' || e.key === 'End')) comp.typed = input.value;
+  });
+  return comp;
 }
 
 function scrollSel() {

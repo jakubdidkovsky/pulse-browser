@@ -2,19 +2,26 @@
 // is gone once closed. Elements are plain objects so the agent can write them as JSON.
 import { PRIVATE } from './state.js';
 import { uid } from './util.js';
+import dagre from './vendor/dagre.js';
+import { SHAPES, ROUTES, SIDES, STICKY_FONT, connectorGeometry, boxOfPoints, fitShape } from './board-geometry.js';
+import { DIRECTIONS, layoutDiagram, placeNew, fitFrames } from './board-layout.js';
 
 export const COLORS = {
   ink: 'var(--text)', gray: '#8e8e93', blue: '#0a84ff', red: '#ff453a',
   green: '#30d158', orange: '#ff9f0a', purple: '#bf5af2', yellow: '#ffd60a',
 };
 export const STICKY_FILLS = { yellow: '#fff1a8', blue: '#cfe6ff', green: '#d3f5dc', red: '#ffd6d3', orange: '#ffe2bf', purple: '#ecd9ff', gray: '#e5e5ea', ink: '#e5e5ea' };
-export const TYPES = ['rect', 'ellipse', 'line', 'arrow', 'text', 'sticky', 'path', 'image'];
+export const TYPES = [...SHAPES, 'frame', 'line', 'arrow', 'text', 'sticky', 'path', 'image'];
+// Default size of each box element: [w, h].
+const BOX_SIZE = {
+  rect: [160, 80], ellipse: [160, 90], diamond: [160, 100], pill: [160, 60], parallelogram: [170, 80], hexagon: [170, 80],
+  cylinder: [120, 100], document: [160, 90], cloud: [180, 110], actor: [40, 70], triangle: [120, 100], frame: [400, 280], sticky: [180, 120],
+};
 const MAX_IMAGE_CHARS = 4 * 1024 * 1024; // a data: URL this long is ~3 MB
 const USER_SETTLE = 1500; // ms of quiet after the user's last edit before the agent looks
 const MAX_ELEMENTS = 2000;
 const MAX_UNDO = 100;
 const SAVE_DELAY = 500; // ms
-const STICKY = { w: 180, h: 120 };
 
 let boards = []; // saved boards: { id, title, elements, updated }
 let current = null; // { id, title, temporary, elements, undo, redo }
@@ -42,13 +49,13 @@ function persist() {
 
 function syncSaved() {
   if (!current || current.temporary) return;
-  const entry = { id: current.id, title: current.title, elements: current.elements, updated: Date.now() };
+  const entry = { id: current.id, title: current.title, elements: current.elements, direction: current.direction, updated: Date.now() };
   boards = [...boards.filter((b) => b.id !== current.id), entry];
   persist();
 }
 
-export function newBoard({ title, temporary = false } = {}) {
-  current = { id: uid(), title: title || (temporary ? 'Temporary board' : 'Untitled board'), temporary: temporary || PRIVATE, elements: [], undo: [], redo: [] };
+export function newBoard({ title, temporary = false, elements = [] } = {}) {
+  current = { id: uid(), title: title || (temporary ? 'Temporary board' : 'Untitled board'), temporary: temporary || PRIVATE, elements, undo: [], redo: [] };
   syncSaved();
   emit('open');
   return current;
@@ -57,7 +64,7 @@ export function newBoard({ title, temporary = false } = {}) {
 export function openBoard(id) {
   const b = boards.find((x) => x.id === id);
   if (!b) return null;
-  current = { id: b.id, title: b.title, temporary: false, elements: b.elements || [], undo: [], redo: [] };
+  current = { id: b.id, title: b.title, temporary: false, elements: b.elements || [], direction: b.direction, undo: [], redo: [] };
   emit('open');
   return current;
 }
@@ -122,14 +129,19 @@ export function redo() {
 
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const colorOf = (c, d = 'ink') => (COLORS[c] || /^#[0-9a-f]{3,8}$/i.test(String(c || '')) ? c : d);
+const CONNECTORS = new Set(['line', 'arrow']);
+export const isConnector = (e) => CONNECTORS.has(e?.type);
+// Anything a connector can attach to.
+export const isBox = (e) => !!e && !isConnector(e) && e.type !== 'path';
 
 // Cleans one element from the agent or the UI into the stored shape.
 export function normalize(raw, by = 'user') {
   const type = TYPES.includes(raw?.type) ? raw.type : null;
   if (!type) throw new Error(`Unknown element type "${raw?.type}". Use one of: ${TYPES.join(', ')}.`);
-  const el = { id: String(raw.id || uid()), type, by: raw.by || by, color: colorOf(raw.color, type === 'sticky' ? 'yellow' : 'ink') };
+  const el = { id: String(raw.id || uid()), type, by: raw.by || by, color: colorOf(raw.color, type === 'sticky' ? 'yellow' : type === 'frame' ? 'gray' : 'ink') };
   if (raw.text != null) el.text = String(raw.text).slice(0, 4000);
   el.size = num(raw.size, 2) > 3 ? 4 : 2;
+  if (raw.parent != null && raw.parent !== '' && !CONNECTORS.has(type)) el.parent = String(raw.parent);
   if (type === 'path') {
     el.points = (Array.isArray(raw.points) ? raw.points : []).filter((p) => Array.isArray(p) && p.length >= 2).map(([x, y]) => [num(x), num(y)]).slice(0, 4000);
     if (el.points.length < 2) throw new Error('A path needs at least two [x, y] points.');
@@ -137,13 +149,20 @@ export function normalize(raw, by = 'user') {
   }
   el.x = num(raw.x);
   el.y = num(raw.y);
-  if (type === 'line' || type === 'arrow') {
+  if (CONNECTORS.has(type)) {
     if (raw.from) el.from = String(raw.from);
     if (raw.to) el.to = String(raw.to);
     el.x2 = num(raw.x2, el.x + 160);
     el.y2 = num(raw.y2, el.y);
+    el.route = ROUTES.includes(raw.route) ? raw.route : el.from && el.to ? 'orthogonal' : 'straight';
+    if (SIDES.includes(raw.fromSide)) el.fromSide = raw.fromSide;
+    if (SIDES.includes(raw.toSide)) el.toSide = raw.toSide;
+    if (raw.dash) el.dash = true;
+    if (raw.both && type === 'arrow') el.both = true;
     return el;
   }
+  // Shapes the agent didn't place get a position from the auto-layout (see apply).
+  if (raw.x == null || raw.y == null) el.unplaced = true;
   if (type === 'image') {
     const src = String(raw.src || '');
     if (!/^(data:image\/|https?:\/\/)/i.test(src)) throw new Error('An image needs src: an http(s) URL, "screenshot", or a data:image URL.');
@@ -159,78 +178,159 @@ export function normalize(raw, by = 'user') {
     el.w = Math.max(40, num(raw.w, 320));
     return el;
   }
-  el.w = Math.max(20, num(raw.w, type === 'sticky' ? STICKY.w : 160));
-  el.h = Math.max(20, num(raw.h, type === 'sticky' ? STICKY.h : 100));
+  const [w, h] = BOX_SIZE[type] || BOX_SIZE.rect;
+  el.w = Math.max(20, num(raw.w, w));
+  el.h = Math.max(20, num(raw.h, h));
   if (raw.fill && type !== 'sticky') el.fill = colorOf(raw.fill, 'none');
+  if (raw.fontSize != null && type !== 'sticky') el.fontSize = Math.max(10, Math.min(48, num(raw.fontSize, 15)));
   return el;
 }
 
-// Agent edits: add or replace by id, remove ids, optionally start from a clean board.
-export function apply({ elements = [], remove = [], clear = false }, by = 'ai') {
+const withoutFlags = ({ unplaced, ...e }) => e;
+const NODE_LAYOUT_TYPES = (e) => isBox(e) && e.type !== 'frame';
+
+// ---------------------------------------------------------------- label sizing
+
+const FITTED = new Set([...SHAPES.filter((k) => k !== 'actor'), 'sticky']);
+const TEXT_SLACK = 1.05; // canvas widths run a little under the DOM's; never clip by a pixel
+let textCanvas = null;
+
+function measurer(fontSize) {
+  textCanvas ||= document.createElement('canvas').getContext('2d');
+  const font = `600 ${fontSize}px ${getComputedStyle(document.body).fontFamily || 'system-ui, sans-serif'}`;
+  return (s) => {
+    textCanvas.font = font;
+    return textCanvas.measureText(s).width * TEXT_SLACK;
+  };
+}
+
+// A shape the agent labels without giving it a size grows to fit the label instead of clipping it.
+// One already on the board that isn't being moved grows around its center.
+function fitLabel(el, raw, prev) {
+  if (!FITTED.has(el.type) || !el.text || raw?.text == null || raw.w != null || raw.h != null) return el;
+  const fontSize = el.type === 'sticky' ? STICKY_FONT : el.fontSize || 15;
+  const { w, h } = fitShape(el.type, el.text, { w: el.w, h: el.h, fontSize, measure: measurer(fontSize) });
+  if (w === el.w && h === el.h) return el;
+  const recentered = prev && raw.x == null && raw.y == null;
+  return recentered ? { ...el, w, h, x: el.x - (w - el.w) / 2, y: el.y - (h - el.h) / 2 } : { ...el, w, h };
+}
+
+// Agent edits: add or replace by id, remove ids, optionally start from a clean board, optionally lay the
+// diagram out. Shapes sent without x/y are placed automatically: a new diagram gets a full layout, an
+// existing one keeps its shapes and the new ones go next to whatever they connect to.
+export function apply({ elements = [], remove = [], clear = false, layout = null }, by = 'ai') {
   if (!current) throw new Error('No board is open.');
   const drop = new Set(remove.map(String));
-  const base = clear ? [] : current.elements.filter((e) => !drop.has(e.id));
+  const base = clear ? [] : current.elements.filter((e) => !drop.has(e.id) && !drop.has(e.from) && !drop.has(e.to));
+  // A cleared board forgets which way its old diagram flowed.
+  if (clear) current.direction = undefined;
   const byId = new Map(base.map((e) => [e.id, e]));
   // An update only changes what it names; the element keeps its other fields and its author.
   const incoming = elements.map((raw) => {
     const prev = raw?.id != null ? byId.get(String(raw.id)) : null;
-    return normalize(prev ? { ...prev, ...raw, by: prev.by } : raw, by);
+    return fitLabel(normalize(prev ? { ...prev, ...raw, by: prev.by } : raw, by), raw, prev);
   });
+  const existed = new Set(byId.keys());
   for (const e of incoming) byId.set(e.id, e);
-  commit([...byId.values()], { why: 'ai' });
+  // A connector naming a shape that isn't there would be drawn from a corner of the board.
+  for (const c of incoming.filter(isConnector)) {
+    for (const end of ['from', 'to']) {
+      if (c[end] && !byId.has(c[end])) throw new Error(`Connector "${c.id}": ${end} "${c[end]}" is not an element on the board. Use one of: ${[...byId.keys()].slice(0, 40).join(', ')}.`);
+    }
+  }
+  let list = [...byId.values()];
+  const direction = DIRECTIONS.includes(layout) ? layout : layout === true ? current.direction || 'TB' : null;
+  const unplaced = new Set(incoming.filter((e) => e.unplaced && NODE_LAYOUT_TYPES(e)).map((e) => e.id));
+  const linked = new Set(list.filter((e) => isConnector(e) && e.from && e.to).flatMap((c) => [c.from, c.to]));
+  const hasDiagram = list.some((e) => linked.has(e.id) && NODE_LAYOUT_TYPES(e) && !e.unplaced);
+  if (direction) {
+    list = layoutDiagram(list, { direction }, dagre, bounds);
+    current.direction = direction;
+  } else if (unplaced.size) {
+    const flow = current.direction || 'TB';
+    list = hasDiagram ? placeNew(list, unplaced, { direction: flow }, bounds) : layoutDiagram(list, { direction: flow }, dagre, bounds);
+    // Connectors route along the direction the diagram was laid out in.
+    if (!hasDiagram) current.direction = flow;
+  }
+  // Frames the agent didn't size wrap the shapes that name them as parent.
+  const fit = new Set(incoming.filter((e) => e.type === 'frame' && !existed.has(e.id) && (e.unplaced || !elements.find((r) => String(r?.id) === e.id)?.w)).map((e) => e.id));
+  if (fit.size) list = fitFrames(list, bounds, fit);
+  commit(list.map(withoutFlags), { why: 'ai' });
   return incoming.map((e) => e.id);
 }
 
+// Re-arranges the whole diagram (the "Tidy up" button and the agent's layout option).
+export function arrange(direction = current?.direction || 'TB') {
+  if (!current) return;
+  current.direction = direction;
+  commit(layoutDiagram(current.elements, { direction }, dagre, bounds).map(withoutFlags), { why: 'ai' });
+}
+
 export function bounds(el, all = current?.elements || []) {
-  if (el.type === 'path') {
-    const xs = el.points.map((p) => p[0]);
-    const ys = el.points.map((p) => p[1]);
-    return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
-  }
-  if (el.type === 'line' || el.type === 'arrow') {
-    const [a, b] = endpoints(el, all);
-    return { x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]), w: Math.abs(b[0] - a[0]), h: Math.abs(b[1] - a[1]) };
-  }
+  if (el.type === 'path') return boxOfPoints(el.points);
+  if (isConnector(el)) return boxOfPoints(connector(el, all).points);
   if (el.type === 'text') return { x: el.x, y: el.y, w: el.w, h: el.h || el.fontSize * 1.5 };
   return { x: el.x, y: el.y, w: el.w, h: el.h };
 }
 
-// Where a connector leaves/enters a shape: on its edge, towards the other end.
-function edgePoint(el, toward, all) {
-  const b = bounds(el, all);
-  const cx = b.x + b.w / 2;
-  const cy = b.y + b.h / 2;
-  const dx = toward[0] - cx;
-  const dy = toward[1] - cy;
-  if (!dx && !dy) return [cx, cy];
-  if (el.type === 'ellipse') {
-    const t = 1 / Math.sqrt((dx * dx) / ((b.w / 2) ** 2) + (dy * dy) / ((b.h / 2) ** 2));
-    return [cx + dx * t, cy + dy * t];
+// Shapes whose connectors tell which way a diagram flows.
+const isFlowShape = (e) => isBox(e) && e.type !== 'frame';
+const ROUTE_REACH = 60; // px around a connector's two shapes where other shapes can be in its way
+const FLOW_SHARE = 0.8;
+const inferred = new WeakMap(); // elements array -> flow
+
+// The direction a board's diagram flows in: the one it was laid out in, otherwise the one nearly all
+// of its connectors follow (an older or hand-drawn top-down diagram still routes top-down).
+function flowOf(all) {
+  if (current?.direction) return current.direction;
+  if (!inferred.has(all)) {
+    const shapes = new Map(all.filter(isFlowShape).map((e) => [e.id, bounds(e, all)]));
+    const pairs = all.filter((c) => isConnector(c) && c.from !== c.to && shapes.has(c.from) && shapes.has(c.to)).map((c) => [shapes.get(c.from), shapes.get(c.to)]);
+    const down = pairs.filter(([a, b]) => b.y > a.y + a.h).length;
+    const right = pairs.filter(([a, b]) => b.x > a.x + a.w).length;
+    const need = Math.max(2, pairs.length * FLOW_SHARE);
+    inferred.set(all, down >= need && down > right ? 'TB' : right >= need && right > down ? 'LR' : null);
   }
-  const t = Math.min((b.w / 2) / Math.abs(dx || 1e-9), (b.h / 2) / Math.abs(dy || 1e-9));
-  return [cx + dx * t, cy + dy * t];
+  return inferred.get(all);
 }
 
-export function endpoints(el, all = current?.elements || []) {
-  const from = el.from && all.find((e) => e.id === el.from && e.type !== 'line' && e.type !== 'arrow');
-  const to = el.to && all.find((e) => e.id === el.to && e.type !== 'line' && e.type !== 'arrow');
-  const center = (e) => { const b = bounds(e, all); return [b.x + b.w / 2, b.y + b.h / 2]; };
-  let a = [el.x, el.y];
-  let z = [el.x2, el.y2];
-  if (from && to) { a = edgePoint(from, center(to), all); z = edgePoint(to, center(from), all); } else if (from) a = edgePoint(from, z, all);
-  else if (to) z = edgePoint(to, a, all);
-  return [a, z];
+// How a connector runs right now (it follows the shapes it is attached to, around the ones in its way).
+export function connector(el, all = current?.elements || []) {
+  const self = el.from && el.from === el.to;
+  const end = (id, side, point, fallbackSide) => {
+    const e = id && all.find((x) => x.id === id);
+    return isBox(e) ? { box: bounds(e, all), kind: e.type, side: side || fallbackSide } : { point };
+  };
+  // A loop back into the same shape leaves on the right and comes back in from the top.
+  const from = end(el.from, el.fromSide, [el.x, el.y], self ? 'right' : null);
+  const to = end(el.to, el.toSide, [el.x2, el.y2], self ? 'top' : null);
+  let obstacles = [];
+  if (el.route === 'orthogonal' && from.box && to.box) {
+    const x1 = Math.min(from.box.x, to.box.x) - ROUTE_REACH;
+    const y1 = Math.min(from.box.y, to.box.y) - ROUTE_REACH;
+    const x2 = Math.max(from.box.x + from.box.w, to.box.x + to.box.w) + ROUTE_REACH;
+    const y2 = Math.max(from.box.y + from.box.h, to.box.y + to.box.h) + ROUTE_REACH;
+    // Frames count too, unless the connector starts or ends inside them.
+    const around = (f) => [from.box, to.box].some((b) => b.x >= f.x && b.y >= f.y && b.x + b.w <= f.x + f.w && b.y + b.h <= f.y + f.h);
+    obstacles = all.filter((e) => isBox(e) && e.id !== el.from && e.id !== el.to).map((e) => ({ e, b: bounds(e, all) }))
+      .filter(({ e, b }) => b.x < x2 && b.x + b.w > x1 && b.y < y2 && b.y + b.h > y1 && (e.type !== 'frame' || !around(b)))
+      .map(({ b }) => b);
+  }
+  return connectorGeometry(el.route || 'straight', from, to, { obstacles, flow: flowOf(all) });
 }
 
 // Compact description for the agent (whiteboard_read).
 export function describeElements(list = current?.elements || []) {
+  const all = current?.elements || list;
   return list.map((e) => {
-    const b = bounds(e, list);
+    const b = bounds(e, all);
     const label = e.text || e.alt;
     const text = label ? ` "${label.replace(/\s+/g, ' ').slice(0, 120)}"` : '';
-    const link = e.from || e.to ? ` ${e.from || '?'} → ${e.to || '?'}` : '';
-    const where = e.type === 'path' ? `freehand stroke in box ${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.w)}×${Math.round(b.h)}` : `at ${Math.round(b.x)},${Math.round(b.y)} size ${Math.round(b.w)}×${Math.round(b.h)}`;
-    return `- id=${e.id} ${e.type}${text}${link} ${where} color=${e.color}${e.by === 'ai' ? ' (yours)' : ' (user)'}`;
+    const link = isConnector(e) ? ` ${e.from || 'loose'}${e.fromSide ? `.${e.fromSide}` : ''} → ${e.to || 'loose'}${e.toSide ? `.${e.toSide}` : ''} ${e.route || 'straight'}${e.dash ? ' dashed' : ''}${e.both ? ' two-way' : ''}` : '';
+    const where = e.type === 'path' ? `freehand stroke in box ${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.w)}×${Math.round(b.h)}`
+      : isConnector(e) ? '' : ` at ${Math.round(b.x)},${Math.round(b.y)} size ${Math.round(b.w)}×${Math.round(b.h)}`;
+    const extra = `${e.fill && e.fill !== 'none' ? ` fill=${e.fill}` : ''}${e.parent ? ` in=${e.parent}` : ''}`;
+    return `- id=${e.id} ${e.type}${text}${link}${where} color=${e.color}${extra}${e.by === 'ai' ? ' (yours)' : ' (user)'}`;
   }).join('\n');
 }
 

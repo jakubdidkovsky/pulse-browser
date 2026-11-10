@@ -24,13 +24,12 @@ export const isSplit = () => !!S.split;
 
 // ---------------------------------------------------------------- state changes
 
+// Keeps the page you're on and the pages already split; new panes start empty so you pick (or drag in) what goes there.
 export function setLayout(layout) {
   if (!LAYOUTS[layout]) { exitSplit(); return; }
   const count = LAYOUTS[layout].panes;
   const active = Tabs.activeTab();
   const ids = [...new Set([active && !isStart(active.url) ? active.id : null, ...(S.split?.panes || [])].filter(Boolean))];
-  const recent = webTabs().filter((t) => !ids.includes(t.id)).sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
-  while (ids.length < count && recent.length) ids.push(recent.shift().id);
   const panes = Array.from({ length: count }, (_, i) => ids[i] || null);
   S.split = { layout, panes, x: S.split?.x ?? 0.5, y: S.split?.y ?? 0.5, focus: 0 };
   for (const id of panes) { const t = paneTab(id); if (t) Tabs.ensureWebview(t); }
@@ -69,13 +68,24 @@ export function openInSplit(tab) {
   Tabs.activate(tab.id);
 }
 
+// Puts `tab` in pane `index`. A tab that already sits in another pane swaps places with what was there.
 function fillPane(index, tab) {
   const sp = S.split;
   if (!sp || !tab) return;
-  const old = sp.panes.indexOf(tab.id);
-  if (old >= 0) sp.panes[old] = null;
-  sp.panes[index] = tab.id;
+  const from = sp.panes.indexOf(tab.id);
+  sp.panes = sp.panes.map((id, i) => (i === index ? tab.id : i === from ? sp.panes[index] : id));
   sp.focus = index;
+  Tabs.ensureWebview(tab);
+  Tabs.activate(tab.id);
+}
+
+// Starts a two-pane split with `tab` on `side` of the page that's showing now.
+function splitWith(tab, side) {
+  const active = Tabs.activeTab();
+  const other = active && !isStart(active.url) && active.id !== tab.id ? active.id : null;
+  const first = side === 'left' || side === 'top';
+  const layout = side === 'left' || side === 'right' ? 'cols' : 'rows';
+  S.split = { layout, panes: first ? [tab.id, other] : [other, tab.id], x: 0.5, y: 0.5, focus: first ? 0 : 1 };
   Tabs.ensureWebview(tab);
   Tabs.activate(tab.id);
 }
@@ -125,9 +135,12 @@ function reconcile() {
   if (!active) return;
   const at = sp.panes.indexOf(active);
   if (at >= 0) { sp.focus = at; return; }
-  // A tab opened from the sidebar, palette or a link takes the focused pane (or an empty one).
+  // A tab opened from the sidebar, palette or a link fills an empty pane first, else takes the focused one.
+  const empty = sp.panes.findIndex((id) => !paneTab(id));
   const focus = (sp.focus ?? 0) < sp.panes.length ? (sp.focus ?? 0) : 0;
-  sp.panes[focus] = active;
+  const into = empty >= 0 ? empty : focus;
+  sp.panes[into] = active;
+  sp.focus = into;
 }
 
 // ---------------------------------------------------------------- layout
@@ -160,6 +173,7 @@ function emptyPane(index) {
     h('div', { class: 'pane-empty-inner' },
       h('div', { class: 'pane-empty-glyph', html: icon(LAYOUTS[sp.layout].icon, 22) }),
       h('h3', {}, 'Choose a page for this side'),
+      h('p', { class: 'pane-hint' }, 'Or drag a tab here.'),
       input,
       choices.length ? h('div', { class: 'pane-choices' }, ...choices.map((t) =>
         h('button', { class: 'pane-choice', title: t.url, onclick: () => fillPane(index, t) },
@@ -171,11 +185,108 @@ function paneHead(id, index) {
   const t = Tabs.getTab(id);
   const focused = !!t && id === S.activeId;
   const tool = (iconName, title, run) => h('button', { class: 'pane-tool', title, html: icon(iconName, 13), onclick: (e) => { e.stopPropagation(); run(); } });
-  return h('div', { class: `pane-head${focused ? ' focused' : ''}`, onclick: () => { if (t && !focused) Tabs.activate(t.id); } },
+  const head = h('div', { class: `pane-head${focused ? ' focused' : ''}`, onclick: () => { if (t && !focused) Tabs.activate(t.id); } },
     t && !isStart(t.url) ? favicon(t, 14) : h('span', { class: 'pane-head-dot', html: icon('square', 12) }),
     h('span', { class: 'pane-title' }, t ? (isStart(t.url) ? 'New Tab' : t.title || hostOf(t.url)) : 'Empty'),
     t ? tool('square', 'Show only this page', () => showOnly(t.id)) : null,
     tool('x', 'Remove from split view', () => removeFromSplit(index)));
+  // Dragging a header onto another pane moves the page there.
+  if (paneTab(id)) {
+    head.draggable = true;
+    head.addEventListener('dragstart', (e) => {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/uri-list', t.url);
+      e.dataTransfer.setData('text/plain', t.url);
+      startTabDrag(t, { fromPane: true });
+    });
+    head.addEventListener('dragend', endTabDrag);
+  }
+  return head;
+}
+
+// ---------------------------------------------------------------- drag a tab into split view
+
+// While a tab is dragged (sidebar, strip on top, favorites, a pane header) a layer covers the pages: the pages are
+// separate processes and would swallow the drag. Without a split, the half you point at gets the tab; in a split,
+// the pane you point at does.
+let drag = null; // { id, fromPane }
+
+export function startTabDrag(tab, { fromPane = false } = {}) {
+  if (!tab || isStart(tab.url)) return;
+  if (!S.split && tab.id === S.activeId) return; // the page that's showing has nothing to split with
+  drag = { id: tab.id, fromPane };
+  // Not in dragstart itself: changing the DOM there can cancel the drag.
+  setTimeout(() => { if (drag) dropLayer().classList.add('on'); });
+}
+
+export function endTabDrag() {
+  if (!drag) return;
+  const { fromPane } = drag;
+  drag = null;
+  const layer = $('#views .split-drop');
+  if (layer) { layer.classList.remove('on'); showZone(null); }
+  if (fromPane) render(); // headers were left alone during the drag
+}
+
+function dropLayer() {
+  const views = $('#views');
+  let layer = views.querySelector('.split-drop');
+  if (layer) return layer;
+  layer = h('div', { class: 'split-drop' }, h('div', { class: 'split-drop-zone' }, h('span', { class: 'split-drop-label' })));
+  layer.addEventListener('dragover', (e) => {
+    const target = drag && dropTargetAt(e);
+    showZone(target);
+    if (!target) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  });
+  layer.addEventListener('dragleave', () => showZone(null));
+  layer.addEventListener('drop', (e) => {
+    const target = drag && dropTargetAt(e);
+    const tab = drag && Tabs.getTab(drag.id);
+    e.preventDefault();
+    endTabDrag();
+    if (!target || !tab) return;
+    if (target.side) splitWith(tab, target.side);
+    else fillPane(target.index, tab);
+  });
+  views.append(layer);
+  return layer;
+}
+
+const SIDE_LABEL = { left: 'Open on the Left', right: 'Open on the Right', top: 'Open on Top', bottom: 'Open at the Bottom' };
+
+// Where a drop at the pointer would put the dragged tab: { side, rect, label } or { index, rect, label }.
+function dropTargetAt(e) {
+  const box = $('#views').getBoundingClientRect();
+  const x = e.clientX - box.left;
+  const y = e.clientY - box.top;
+  const sp = S.split;
+  if (sp) {
+    const rects = paneRects(sp, box.width, box.height);
+    const index = rects.findIndex(([rx, ry, rw, rh]) => x >= rx && x <= rx + rw + GAP && y >= ry && y <= ry + rh + GAP);
+    if (index < 0 || sp.panes[index] === drag.id) return null;
+    const label = sp.panes.includes(drag.id) ? 'Swap Pages' : paneTab(sp.panes[index]) ? 'Replace Page' : 'Open Here';
+    return { index, rect: rects[index], label };
+  }
+  // The nearer edge wins: left or right splits side by side, top or bottom stacks.
+  const dx = x / box.width - 0.5;
+  const dy = y / box.height - 0.5;
+  const side = Math.abs(dx) >= Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : (dy < 0 ? 'top' : 'bottom');
+  const layout = side === 'left' || side === 'right' ? 'cols' : 'rows';
+  const rects = paneRects({ layout, x: 0.5, y: 0.5 }, box.width, box.height);
+  return { side, rect: rects[side === 'left' || side === 'top' ? 0 : 1], label: SIDE_LABEL[side] };
+}
+
+function showZone(target) {
+  const zone = $('#views .split-drop-zone');
+  if (!zone) return;
+  zone.classList.toggle('show', !!target);
+  if (!target) return;
+  const [x, y, w, hgt] = target.rect;
+  const inset = 6;
+  place(zone, [x + inset, y + inset, Math.max(0, w - 2 * inset), Math.max(0, hgt - 2 * inset)]);
+  zone.firstChild.textContent = target.label;
 }
 
 function divider(kind, rect) {
@@ -208,6 +319,8 @@ function startResize(e, kind) {
 }
 
 function render() {
+  // Rebuilding the headers would remove the one being dragged, and Chromium then never sends dragend.
+  if (drag?.fromPane) return;
   const views = $('#views');
   const sp = S.split;
   const overlays = [$('#start-page'), $('#error-page')];
@@ -287,6 +400,8 @@ export function initSplit() {
   });
   Tabs.on('onActivate', reconcile);
   onChange(() => { reconcile(); render(); });
+  // A drag whose dragend never arrived (its source was removed) must not leave the drop layer up.
+  window.addEventListener('pointerdown', endTabDrag, true);
   new ResizeObserver(() => { if (S.split) render(); }).observe(views);
   render();
 }

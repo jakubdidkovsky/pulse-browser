@@ -67,7 +67,10 @@ function userAsked(texts, re) {
 
 function pageAgent() {
   if (window.__lumenAgent) return;
-  const SEL = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=checkbox],[role=radio],[role=switch],[role=combobox],[role=textbox],[role=searchbox],[role=slider],[role=spinbutton],[role=treeitem],[contenteditable=""],[contenteditable="true"],[onclick],[tabindex]:not([tabindex="-1"])';
+  // This function runs inside the web page, so its constants live here.
+  const COMPACT_ELEMENTS = 60; // elements listed after an action (only what's on screen)
+  const COMPACT_TEXT = 1200; // chars of visible text after an action
+  const SEL ='a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=checkbox],[role=radio],[role=switch],[role=combobox],[role=textbox],[role=searchbox],[role=slider],[role=spinbutton],[role=treeitem],[contenteditable=""],[contenteditable="true"],[onclick],[tabindex]:not([tabindex="-1"])';
   let refs = [];
   const clean = (s, n = 80) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, n);
   // Where a link goes, without tracking noise: random IDs like sxsrf=AKL5yDg… cost many tokens and tell
@@ -251,7 +254,8 @@ function pageAgent() {
       const lines = [];
       let above = 0;
       let below = 0;
-      const limit = opts.full ? 500 : 160;
+      // compact: after an action only what's on screen, to keep each step's result small.
+      const limit = opts.full ? 500 : opts.compact ? COMPACT_ELEMENTS : 160;
       for (const el of all) {
         if (picked.has(el) || !isVisible(el)) continue;
         const parent = el.parentElement?.closest(SEL);
@@ -260,10 +264,10 @@ function pageAgent() {
         let where = '';
         if (r.bottom < 0) {
           where = 'above';
-          if (!opts.full && r.bottom < -vh) { above++; continue; }
+          if (!opts.full && (opts.compact || r.bottom < -vh)) { above++; continue; }
         } else if (r.top > vh) {
           where = 'below';
-          if (!opts.full && r.top > vh * 2) { below++; continue; }
+          if (!opts.full && (opts.compact || r.top > vh * 2)) { below++; continue; }
         }
         if (lines.length >= limit) { below++; continue; }
         picked.add(el);
@@ -273,7 +277,7 @@ function pageAgent() {
       return {
         url: location.href, title: document.title, scrollY: Math.round(scrollY),
         scrollH: document.documentElement.scrollHeight, vw: innerWidth, vh,
-        elements: lines.join('\n'), above, below, text: visibleText(3500),
+        elements: lines.join('\n'), above, below, text: visibleText(opts.compact ? COMPACT_TEXT : 3500),
         focused: active >= 0 ? `[${active}]` : '',
         dialog: !!document.querySelector('dialog[open],[role=dialog]:not([aria-hidden=true]),[aria-modal=true]'),
       };
@@ -676,11 +680,12 @@ async function settle(tab) {
 
 const zoomOf = (tab) => { try { return tab.wv.getZoomFactor() || 1; } catch { return 1; } };
 
-async function describePage(tab, full = false) {
+// full: every element on the page; compact: only what's on screen, with less text (after an action).
+async function describePage(tab, { full = false, compact = false } = {}) {
   if (!tab || isStart(tab.url) || !tab.wv) return 'No web page is open in the controlled tab. Use browser_navigate to open one.';
   await waitReady(tab);
   if (tab.error) return `The page failed to load: ${tab.error.description || tab.error.code} (${tab.error.url}).`;
-  const s = await page(tab, `__lumenAgent.snapshot(${JSON.stringify({ full })})`);
+  const s = await page(tab, `__lumenAgent.snapshot(${JSON.stringify({ full, compact })})`);
   const opened = [...popups.values()].filter((p) => p.openerId === tab.wcId);
   return [
     tab.popup ? 'Controlled page: a pop-up window (not a tab).' : '',
@@ -691,7 +696,7 @@ async function describePage(tab, full = false) {
     '',
     'Interactive elements:',
     s.elements || '(none visible)',
-    s.above || s.below ? `(${s.above ? `${s.above} more above` : ''}${s.above && s.below ? ', ' : ''}${s.below ? `${s.below} more below` : ''}; scroll, or browser_snapshot with full=true)` : '',
+    s.above || s.below ? `(${s.above ? `${s.above} more above` : ''}${s.above && s.below ? ', ' : ''}${s.below ? `${s.below} more below` : ''}; scroll, or ${compact ? 'browser_snapshot' : 'browser_snapshot with full=true'})` : '',
     '',
     'Visible text:',
     s.text || '(none)',
@@ -862,7 +867,7 @@ async function execute(run, name, args) {
     case 'browser_snapshot': {
       step(run, 'eye', `Reading ${tab && !isStart(tab.url) ? hostOf(tab.url) || 'the page' : 'the tab'}`);
       const notice = popupNotice(run);
-      return text(notice + await describePage(tab, !!args.full));
+      return text(notice + await describePage(tab, { full: !!args.full }));
     }
     case 'browser_act': {
       if (run.popupNote) {
@@ -891,7 +896,7 @@ async function execute(run, name, args) {
       await settle(tab);
       const now = await currentTarget(run, tab);
       const skipped = args.actions.length - done.length;
-      return text(`${done.join('\n')}${skipped ? `\n(${skipped} remaining action${skipped > 1 ? 's were' : ' was'} skipped because the controlled page changed.)` : ''}\n\n${popupNotice(run)}${await describePage(now)}`);
+      return text(`${done.join('\n')}${skipped ? `\n(${skipped} remaining action${skipped > 1 ? 's were' : ' was'} skipped because the controlled page changed.)` : ''}\n\n${popupNotice(run)}${await describePage(now, { compact: true })}`);
     }
     case 'browser_navigate': {
       const target = String(args.url || '').trim();
@@ -994,7 +999,7 @@ async function execute(run, name, args) {
         step(run, 'plus', `Opened a new tab: ${hostOf(url)}`);
         await sleep(150);
         await settle(t);
-        return text(await describePage(t));
+        return text(await describePage(t, { compact: true }));
       }
       if (args.action === 'split') {
         const kind = Split.showTabs((args.tab_ids || []).map(String), args.layout);
@@ -1056,6 +1061,7 @@ async function execute(run, name, args) {
         elements,
         remove: Array.isArray(args.remove) ? args.remove : [],
         clear: !!args.clear,
+        layout: args.layout || null,
       });
       const b = Board.currentBoard();
       Board.markSeen();
